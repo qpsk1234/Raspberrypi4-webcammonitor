@@ -1,0 +1,14 @@
+{
+    "telegram_token": "YOUR_BOT_TOKEN_HERE",
+    "telegram_chat_id": "YOUR_CHAT_ID_HERE",
+    "detection_threshold": 0.6,
+    "notify_interval": 60,
+    "model_path": "model.tflite",
+    "video_source": 0,
+    "save_directory": "records",
+    "stream_width": 640,
+    "stream_height": 480,
+    "use_gui": false,
+    "web_user": "admin",
+    "web_pass": "admin"
+}
