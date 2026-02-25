@@ -1,0 +1,6 @@
+opencv-python
+numpy
+flask
+requests
+python-telegram-bot
+# tflite-runtime # Raspberry Pi上ではこれをインストール
