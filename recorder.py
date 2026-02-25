@@ -18,6 +18,7 @@ class Recorder:
         self._lock = threading.Lock()
         self._stop_timer = None
         self.is_recording = False
+        self.current_video_path = None # 現在または直前の録画パス
 
         os.makedirs(save_directory, exist_ok=True)
 
@@ -34,9 +35,25 @@ class Recorder:
 
             if self._writer is None:
                 filepath = self._new_filepath()
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                self._writer = cv2.VideoWriter(
-                    filepath, fourcc, self.fps, self.resolution)
+                # ブラウザ互換性の高い H.264 (avc1) を優先、失敗したら mp4v
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                    self._writer = cv2.VideoWriter(
+                        filepath, fourcc, self.fps, self.resolution)
+                    if not self._writer.isOpened():
+                        raise Exception("avc1 codec failed")
+                except Exception:
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    self._writer = cv2.VideoWriter(
+                        filepath, fourcc, self.fps, self.resolution)
+                
+                if not self._writer.isOpened():
+                    print(f"[ERROR] Recorder: 録画ファイルを開けませんでした: {filepath}")
+                    self._writer = None
+                    self.is_recording = False
+                    return
+
+                self.current_video_path = filepath
                 self.is_recording = True
                 print(f"[Recorder] 録画開始: {filepath}")
 
@@ -47,12 +64,13 @@ class Recorder:
                 resized = cv2.resize(frame, self.resolution)
                 self._writer.write(resized)
 
-    def schedule_stop(self):
+    def schedule_stop(self, override_post_seconds=None):
         """検知が途切れた際に `post_seconds` 後に録画終了をスケジュールする。"""
+        wait_time = override_post_seconds if override_post_seconds is not None else self.post_seconds
         with self._lock:
             if self._stop_timer is not None:
                 self._stop_timer.cancel()
-        self._stop_timer = threading.Timer(self.post_seconds, self._stop)
+        self._stop_timer = threading.Timer(wait_time, self._stop)
         self._stop_timer.start()
 
     def _stop(self):

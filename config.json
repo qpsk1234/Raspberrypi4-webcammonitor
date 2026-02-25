@@ -14,5 +14,9 @@
     "target_classes": [
         1
     ],
-    "show_all_detections": true
+    "show_all_detections": true,
+    "recorder_post_seconds": 5,
+    "snapshot_width": 1280,
+    "snapshot_height": 720,
+    "snapshot_mode": "start_only"
 }

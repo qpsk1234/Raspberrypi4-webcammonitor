@@ -1,4 +1,4 @@
-from flask import Flask, Response, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, Response, render_template_string, request, jsonify, redirect, url_for, send_from_directory
 from functools import wraps
 import cv2
 import json
@@ -210,7 +210,7 @@ TEMPLATE = """
         <div class="card-header">📋 検知ログ履歴</div>
         <div style="overflow-x:auto;">
           <table class="log-table">
-            <thead><tr><th>日時</th><th>人数</th><th>確信度</th><th>スナップ</th></tr></thead>
+            <thead><tr><th>日時</th><th>検知数</th><th>確信度</th><th>メディア</th></tr></thead>
             <tbody id="log-body">
               <tr><td colspan="4" style="text-align:center;color:var(--muted);padding:14px">データなし</td></tr>
             </tbody>
@@ -252,6 +252,7 @@ TEMPLATE = """
     <div class="tab-bar">
       <button class="nav-item active" onclick="switchTab('detect')">📹 検知</button>
       <button class="nav-item" onclick="switchTab('classes')">🍱 クラス</button>
+      <button class="nav-item" onclick="switchTab('recorder')">🎬 録画・保存</button>
       <button class="nav-item" onclick="switchTab('telegram')">✈️ Telegram</button>
       <button class="nav-item" onclick="switchTab('auth')">🔐 認証</button>
       <button class="nav-item" onclick="switchTab('model')">🤖 モデル</button>
@@ -332,6 +333,41 @@ TEMPLATE = """
       </form>
     </div>
 
+    <!-- 🎬 録画・保存設定 -->
+    <div id="tab-recorder" class="tab-content">
+      <form id="form-recorder">
+        <div class="section-title">録画設定</div>
+        <div class="form-group">
+          <label>ポスト録画（秒）</label>
+          <div style="font-size:0.7rem; color:var(--muted); margin-bottom:8px;">
+            物体が消えた後、何秒間録画を継続するか指定します。
+          </div>
+          <input type="number" name="recorder_post_seconds" value="{{ config.get('recorder_post_seconds', 5) }}" min="0" max="60">
+        </div>
+
+        <div class="section-title">スナップショット設定</div>
+        <div class="form-group">
+          <label>保存解像度（横x縦）</label>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <input type="number" name="snapshot_width" value="{{ config.get('snapshot_width', 1280) }}" min="320" max="1920" step="80" style="flex:1">
+            <span>x</span>
+            <input type="number" name="snapshot_height" value="{{ config.get('snapshot_height', 720) }}" min="240" max="1080" step="60" style="flex:1">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>静止画保存モード</label>
+          <select name="snapshot_mode" style="width:100%; padding:8px; background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+            <option value="start_only" {% if config.get('snapshot_mode') == 'start_only' %}selected{% endif %}>検知開始時のみ</option>
+            <option value="both" {% if config.get('snapshot_mode') == 'both' %}selected{% endif %}>開始と終了の両方</option>
+          </select>
+        </div>
+
+        <button type="button" class="btn primary" onclick="saveForm('form-recorder', 'msg-recorder')">保存</button>
+        <div id="msg-recorder" class="success-msg">✅ 保存しました</div>
+      </form>
+    </div>
+
     <!-- Telegram タブ -->
     <div id="tab-telegram" class="tab-content">
       <form id="form-telegram">
@@ -344,7 +380,10 @@ TEMPLATE = """
           <label>Chat ID</label>
           <input type="text" name="telegram_chat_id" value="{{ config.telegram_chat_id }}" placeholder="-123456789">
         </div>
-        <button type="button" class="btn primary" onclick="saveForm('form-telegram','msg-telegram')">保存</button>
+        <div style="margin-top:20px; display:flex; gap:10px;">
+          <button type="button" class="btn primary" onclick="saveForm('form-telegram','msg-telegram')">保存</button>
+          <button type="button" class="btn" style="background:var(--accent2); color:white;" onclick="sendTestNotify()">通知テスト</button>
+        </div>
         <div id="msg-telegram" class="success-msg">✅ 保存しました</div>
       </form>
     </div>
@@ -408,10 +447,19 @@ TEMPLATE = """
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       document.getElementById('tab-' + id).classList.add('active');
-      const idx_map = {'detect':0, 'classes':1, 'telegram':2, 'auth':3, 'model':4};
+      const idx_map = {'detect':0, 'classes':1, 'recorder':2, 'telegram':3, 'auth':4, 'model':5};
       document.querySelectorAll('.nav-item')[idx_map[id] || 0].classList.add('active');
       if (id === 'model') fetchModelInfo();
       if (id === 'classes') fetchClassesInfo();
+    }
+
+    async function sendTestNotify() {
+        try {
+            const res = await fetch('/api/notify_test', {method:'POST'}).then(r=>r.json());
+            alert(res.message || (res.ok ? "テスト送信をリクエストしました" : "エラーが発生しました"));
+        } catch(e) {
+            alert("接続エラー");
+        }
     }
 
     // ステータスポーリング
@@ -440,13 +488,16 @@ TEMPLATE = """
       try {
         const rows = await fetch('/api/logs').then(r => r.json());
         if (!rows.length) return;
-        document.getElementById('log-body').innerHTML = rows.map(r =>
-          `<tr>
+        document.getElementById('log-body').innerHTML = rows.map(r => {
+          const snapLink = r.snapshot_path ? `<a href="/records/${r.snapshot_path.split(/[\\\\/]/).pop()}" target="_blank" title="画像を表示">📷</a>` : '—';
+          const videoLink = r.video_path ? `<a href="/records/${r.video_path.split(/[\\\\/]/).pop()}" target="_blank" title="動画を再生">🎬</a>` : '—';
+          return `<tr>
             <td>${r.timestamp}</td>
             <td>${r.human_count}</td>
             <td>${(parseFloat(r.confidence_max)*100).toFixed(0)}%</td>
-            <td title="${r.snapshot_path}">${r.snapshot_path ? '📷' : '—'}</td>
-          </tr>`).join('');
+            <td>${snapLink} ${videoLink}</td>
+          </tr>`;
+        }).join('');
       } catch(e) {}
     }
     setInterval(pollLogs, 5000); pollLogs();
@@ -465,6 +516,10 @@ TEMPLATE = """
         } else {
             data[i.name] = (i.type === 'number' || i.type === 'range') ? Number(val) : val;
         }
+      });
+      // フォーム内の select 要素も収集
+      form.querySelectorAll('select').forEach(s => {
+        data[s.name] = s.value;
       });
       const res = await fetch('/api/config', {
         method: 'POST',
@@ -639,6 +694,21 @@ def api_logs():
     rows = logger_instance.read_recent(50) if logger_instance else []
     return jsonify(rows)
 
+@app.route('/api/notify_test', methods=['POST'])
+@requires_auth
+def api_notify_test():
+    if not notifier_instance:
+        return jsonify({"ok": False, "message": "Notifier not initialized"})
+    
+    config = load_config()
+    # 最新の設定で送り直すためにインスタンスを一時的に更新（または config から直接送るNotifier側の機能が必要だが、今はインスタンスの値を更新する）
+    notifier_instance.token = config.get('telegram_token')
+    notifier_instance.chat_id = config.get('telegram_chat_id')
+    notifier_instance.api_url = f"https://api.telegram.org/bot{notifier_instance.token}/"
+    
+    notifier_instance.send_message("🔔 これは監視カメラシステムからのテスト通知です。")
+    return jsonify({"ok": True, "message": "テスト通知を送信しました。コンソールログを確認してください。"})
+
 @app.route('/api/model')
 @requires_auth
 def api_model():
@@ -680,7 +750,8 @@ def api_config():
             'telegram_token', 'telegram_chat_id',
             'stream_width', 'stream_height',
             'web_user', 'web_pass',
-            'target_classes', 'show_all_detections'
+            'target_classes', 'show_all_detections',
+            'recorder_post_seconds', 'snapshot_width', 'snapshot_height', 'snapshot_mode'
         }
         filtered = {k: v for k, v in data.items() if k in allowed_keys}
         save_config(filtered)
@@ -694,6 +765,15 @@ def api_config():
     
     # GET の場合は現在の設定を返す
     return jsonify(load_config())
+
+@app.route('/records/<path:filename>')
+@requires_auth
+def serve_record(filename):
+    config = load_config()
+    save_dir = config.get('save_directory', 'records')
+    # 絶対パスを構築
+    abs_save_dir = os.path.abspath(save_dir)
+    return send_from_directory(abs_save_dir, filename)
 
 def _draw_osd(frame):
     """フレームに検知状態・FPS・日時を重畳する。"""
@@ -773,11 +853,12 @@ def generate_frames():
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-def run_server(cam, logger=None, detector=None):
-    global camera_instance, logger_instance, detector_instance
+def run_server(cam, logger=None, detector=None, notifier=None):
+    global camera_instance, logger_instance, detector_instance, notifier_instance
     camera_instance = cam
     logger_instance = logger
     detector_instance = detector
+    notifier_instance = notifier
     config = load_config()
     system_status['stream_width'] = config.get('stream_width', 640)
     system_status['stream_height'] = config.get('stream_height', 480)

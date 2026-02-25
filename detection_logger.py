@@ -4,7 +4,7 @@ import datetime
 import threading
 
 LOG_FILE = 'detection_log.csv'
-FIELDNAMES = ['timestamp', 'human_count', 'confidence_max', 'snapshot_path']
+FIELDNAMES = ['timestamp', 'human_count', 'confidence_max', 'snapshot_path', 'video_path']
 
 class DetectionLogger:
     """検知イベントを CSV ファイルへ記録するモジュール。"""
@@ -18,13 +18,14 @@ class DetectionLogger:
                 writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
                 writer.writeheader()
 
-    def log(self, human_count, confidence_max=0.0, snapshot_path=''):
+    def log(self, human_count, confidence_max=0.0, snapshot_path='', video_path=''):
         """1件の検知イベントを記録する。"""
         row = {
             'timestamp':      datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'human_count':    human_count,
             'confidence_max': f"{confidence_max:.3f}",
             'snapshot_path':  snapshot_path,
+            'video_path':     video_path,
         }
         with self._lock:
             with open(self.log_path, 'a', newline='', encoding='utf-8') as f:

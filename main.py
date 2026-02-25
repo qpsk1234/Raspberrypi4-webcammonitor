@@ -36,9 +36,9 @@ def main():
         resolution=(config.get('stream_width', 640), config.get('stream_height', 480)))
     logger   = DetectionLogger()
 
-    # Webサーバーを別スレッドで起動（logger, detectorも渡す）
+    # Webサーバーを別スレッドで起動（logger, detector, notifierも渡す）
     web_thread = threading.Thread(
-        target=run_server, args=(cam, logger, detector), daemon=True)
+        target=run_server, args=(cam, logger, detector, notifier), daemon=True)
     web_thread.start()
 
     cam.start()
@@ -85,31 +85,51 @@ def main():
                 recorder.start_recording(frame)
                 recorder.write(frame)
 
-                # Telegram 通知
+                # Telegram 通知 と スナップショット保存
                 current_time = time.time()
-                if current_time - last_notify_time > notify_interval:
+                is_first_detection = (last_notify_time == 0 or current_time - last_notify_time > notify_interval)
+                
+                if is_first_detection:
                     label_names = [detector.classes.get(d[5], f"ID:{d[5]}") for d in target_detections]
                     target_summary = ", ".join(list(set(label_names)))
                     print(f"Target detected ({target_summary})! Sending notification...")
                     
                     # スナップショット保存
+                    snap_w = config.get('snapshot_width', 1280)
+                    snap_h = config.get('snapshot_height', 720)
+                    snap_frame = cv2.resize(frame, (snap_w, snap_h))
+                    
                     snap_path = os.path.join(
                         config['save_directory'],
-                        f"snap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
-                    cv2.imwrite(snap_path, frame)
+                        f"snap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_start.jpg")
+                    cv2.imwrite(snap_path, snap_frame)
                     
-                    notifier.send_photo(frame, caption=f"⚠️ 検知対象を捕捉しました！\n対象: {target_summary}\n数: {len(target_detections)}")
+                    notifier.send_photo(snap_frame, caption=f"⚠️ 検知（開始）: {target_summary}\n数: {len(target_detections)}")
                     
                     # ログ記録
                     logger.log(
                         human_count=len(target_detections),
                         confidence_max=max_score,
-                        snapshot_path=snap_path)
+                        snapshot_path=snap_path,
+                        video_path=recorder.current_video_path)
                     last_notify_time = current_time
             else:
                 system_status['human_count'] = 0
                 if recorder.is_recording:
-                    recorder.schedule_stop()
+                    # 検知終了時のスナップショット（設定されている場合）
+                    if config.get('snapshot_mode') == 'both':
+                        snap_w = config.get('snapshot_width', 1280)
+                        snap_h = config.get('snapshot_height', 720)
+                        snap_frame = cv2.resize(frame, (snap_w, snap_h))
+                        snap_path = os.path.join(
+                            config['save_directory'],
+                            f"snap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_end.jpg")
+                        cv2.imwrite(snap_path, snap_frame)
+                        print(f"[Main] Detection ended. Snapshot saved (end): {snap_path}")
+
+                    recorder.schedule_stop(config.get('recorder_post_seconds', 5))
+                    # 通知タイマーをリセットして次回の検知に備える（任意だが、通常は検知が一旦途切れたら次は即通知したい場合が多い）
+                    # ここではリセットせず、notify_interval を維持する
 
             # 最終的なフレームを Web UI ストリーム用に共有
             web_stream.latest_processed_frame = frame

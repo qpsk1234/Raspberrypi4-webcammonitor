@@ -12,9 +12,13 @@ class TelegramNotifier:
         url = self.api_url + "sendMessage"
         payload = {"chat_id": self.chat_id, "text": text}
         try:
-            requests.post(url, data=payload)
+            r = requests.post(url, data=payload, timeout=10)
+            if not r.ok:
+                print(f"[Telegram] Error: {r.status_code} - {r.text}")
+            else:
+                print(f"[Telegram] Message sent successfully.")
         except Exception as e:
-            print(f"Error sending Telegram message: {e}")
+            print(f"[Telegram] Exception sending message: {e}")
 
     def send_photo(self, frame, caption=""):
         # 一時ファイルとして保存して送信
@@ -26,9 +30,13 @@ class TelegramNotifier:
             files = {"photo": photo}
             payload = {"chat_id": self.chat_id, "caption": caption}
             try:
-                requests.post(url, data=payload, files=files)
+                r = requests.post(url, data=payload, files=files, timeout=15)
+                if not r.ok:
+                    print(f"[Telegram] Error (Photo): {r.status_code} - {r.text}")
+                else:
+                    print(f"[Telegram] Photo sent successfully.")
             except Exception as e:
-                print(f"Error sending Telegram photo: {e}")
+                print(f"[Telegram] Exception sending photo: {e}")
         
         if os.path.exists(photo_path):
             os.remove(photo_path)
