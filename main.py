@@ -9,6 +9,7 @@ from detector import HumanDetector
 from notifier import TelegramNotifier
 from recorder import Recorder
 from detection_logger import DetectionLogger
+import web_stream
 from web_stream import run_server, system_status
 
 def load_config():
@@ -60,51 +61,58 @@ def main():
 
             # オブジェクト検知
             all_detections = detector.detect(frame)
-            # 人間 (class_id=1) のみを抽出
-            human_detections = [d for d in all_detections if d[5] == 1]
+            
+            # 設定されたターゲットクラスIDに含まれるもののみを抽出 (d[5] は class_id)
+            target_classes = config.get('target_classes', [1])
+            target_detections = [d for d in all_detections if d[5] in target_classes]
 
-            if all_detections:
-                # 描画（全オブジェクトを表示）
-                frame = detector.draw_detections(frame, all_detections)
+            # 描画処理
+            draw_list = all_detections if config.get('show_all_detections', True) else target_detections
+            if draw_list:
+                frame = detector.draw_detections(frame, draw_list)
 
-            if human_detections:
-                # 最大スコア算出（人間のみ）
-                max_score = max((d[4] for d in human_detections), default=0.0)
+            if target_detections:
+                # 最大スコア算出
+                max_score = max((d[4] for d in target_detections), default=0.0)
 
-                # ステータス更新（Webダッシュボード向け：人間のみカウント）
-                system_status['human_count']      = len(human_detections)
+                # ステータス更新（Webダッシュボード向け：ターゲット数をカウント）
+                system_status['human_count']      = len(target_detections) # UI上はhuman_countのまま共有
                 system_status['detections_total'] += 1
                 system_status['last_detected']    = \
                     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # 録画（人間がいる時のみ）
+                # 録画（ターゲットがいる時のみ）
                 recorder.start_recording(frame)
                 recorder.write(frame)
 
                 # Telegram 通知
                 current_time = time.time()
                 if current_time - last_notify_time > notify_interval:
-                    print(f"Human detected ({len(human_detections)})! Sending notification...")
+                    label_names = [detector.classes.get(d[5], f"ID:{d[5]}") for d in target_detections]
+                    target_summary = ", ".join(list(set(label_names)))
+                    print(f"Target detected ({target_summary})! Sending notification...")
+                    
                     # スナップショット保存
                     snap_path = os.path.join(
                         config['save_directory'],
                         f"snap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
                     cv2.imwrite(snap_path, frame)
-                    notifier.send_photo(frame, caption=f"⚠️ 人間を検知しました！ (人数: {len(human_detections)})")
+                    
+                    notifier.send_photo(frame, caption=f"⚠️ 検知対象を捕捉しました！\n対象: {target_summary}\n数: {len(target_detections)}")
+                    
                     # ログ記録
                     logger.log(
-                        human_count=len(human_detections),
+                        human_count=len(target_detections),
                         confidence_max=max_score,
                         snapshot_path=snap_path)
                     last_notify_time = current_time
-
             else:
                 system_status['human_count'] = 0
                 if recorder.is_recording:
                     recorder.schedule_stop()
 
             # 最終的なフレームを Web UI ストリーム用に共有
-            system_status['latest_frame'] = frame
+            web_stream.latest_processed_frame = frame
 
             # モニター表示 (GUI)
             if config.get('use_gui', False):

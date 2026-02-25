@@ -10,5 +10,9 @@
     "stream_height": 480,
     "use_gui": false,
     "web_user": "admin",
-    "web_pass": "admin"
+    "web_pass": "admin",
+    "target_classes": [
+        1
+    ],
+    "show_all_detections": true
 }

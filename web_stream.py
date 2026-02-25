@@ -16,8 +16,8 @@ system_status = {
     "human_count": 0,
     "stream_width": 640,
     "stream_height": 480,
-    "latest_frame": None, # 加工済みフレームの共有用
 }
+latest_processed_frame = None  # 加工済みフレームの共有用 (JSONシリアライズ対象外)
 
 # ============================================================
 # HTML テンプレート
@@ -250,10 +250,11 @@ TEMPLATE = """
 
     <!-- タブ -->
     <div class="tab-bar">
-      <div class="tab active" onclick="switchTab('detect')">🔍 検知</div>
-      <div class="tab" onclick="switchTab('telegram')">📨 Telegram</div>
-      <div class="tab" onclick="switchTab('model')">🤖 モデル</div>
-      <div class="tab" onclick="switchTab('auth')">🔐 認証</div>
+      <button class="nav-item active" onclick="switchTab('detect')">📹 検知</button>
+      <button class="nav-item" onclick="switchTab('classes')">🍱 クラス</button>
+      <button class="nav-item" onclick="switchTab('telegram')">✈️ Telegram</button>
+      <button class="nav-item" onclick="switchTab('auth')">🔐 認証</button>
+      <button class="nav-item" onclick="switchTab('model')">🤖 モデル</button>
     </div>
 
     <!-- 検知設定タブ -->
@@ -287,8 +288,47 @@ TEMPLATE = """
           <label>高さ (px)</label>
           <input type="number" name="stream_height" value="{{ config.get('stream_height', 480) }}" min="240" max="1080" step="60">
         </div>
-        <button type="button" class="btn-save" onclick="saveForm('form-detect','msg-detect')">検知設定を保存</button>
-        <p class="save-msg" id="msg-detect">✅ 保存しました</p>
+        <button type="button" class="btn primary" onclick="saveForm('form-detect', 'msg-detect')">保存</button>
+        <div id="msg-detect" class="success-msg">✅ 保存しました</div>
+      </form>
+    </div>
+
+    <!-- 🍱 クラスマップ設定 -->
+    <div id="tab-classes" class="tab-content" style="max-height: 400px; overflow-y: auto;">
+      <form id="form-classes">
+        <div class="section-title">検知・表示設定</div>
+        <div class="form-group checkbox-group">
+          <label>ターゲット以外も表示</label>
+          <input type="checkbox" name="show_all_detections" {% if config.show_all_detections %}checked{% endif %} 
+                 style="width:auto; margin-left:10px;">
+          <div style="font-size:0.7rem; color:var(--muted); margin-top:4px;">
+            オフにすると、選択したターゲット以外の枠が表示されなくなります。
+          </div>
+        </div>
+
+        <div class="section-title">ターゲットクラス選択</div>
+        <div style="font-size:0.7rem; color:var(--muted); margin-bottom:10px;">
+          チェックを入れたクラスが検知・通知・録画の対象になります。<br>
+          ラベル名を日本語などに書き換えることも可能です。
+        </div>
+
+        <table style="width:100%; font-size:0.8rem; border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);">
+              <th style="padding:5px; text-align:left;">対象</th>
+              <th style="padding:5px; text-align:left;">ID</th>
+              <th style="padding:5px; text-align:left;">ラベル名</th>
+            </tr>
+          </thead>
+          <tbody id="classes-list-area">
+            <!-- JSで動的に構築 -->
+          </tbody>
+        </table>
+        
+        <div style="margin-top:15px;">
+          <button type="button" class="btn primary" onclick="saveClasses()">設定を保存</button>
+          <div id="msg-classes" class="success-msg">✅ 保存しました</div>
+        </div>
       </form>
     </div>
 
@@ -304,8 +344,8 @@ TEMPLATE = """
           <label>Chat ID</label>
           <input type="text" name="telegram_chat_id" value="{{ config.telegram_chat_id }}" placeholder="-123456789">
         </div>
-        <button type="button" class="btn-save" onclick="saveForm('form-telegram','msg-telegram')">Telegram設定を保存</button>
-        <p class="save-msg" id="msg-telegram">✅ 保存しました</p>
+        <button type="button" class="btn primary" onclick="saveForm('form-telegram','msg-telegram')">保存</button>
+        <div id="msg-telegram" class="success-msg">✅ 保存しました</div>
       </form>
     </div>
 
@@ -315,7 +355,7 @@ TEMPLATE = """
       <div id="model-details-area">
         <p style="color:var(--muted);font-size:0.8rem;">読み込み中...</p>
       </div>
-      <button type="button" class="btn-save" style="background:var(--border);margin-top:20px;" onclick="fetchModelInfo()">情報を更新</button>
+      <button type="button" class="btn" style="margin-top:20px;" onclick="fetchModelInfo()">情報を更新</button>
     </div>
 
     <!-- 認証タブ -->
@@ -330,8 +370,8 @@ TEMPLATE = """
           <label>パスワード</label>
           <input type="text" name="web_pass" value="{{ config.get('web_pass','admin') }}">
         </div>
-        <button type="button" class="btn-save" onclick="saveForm('form-auth','msg-auth')">認証設定を保存</button>
-        <p class="save-msg" id="msg-auth">✅ 保存しました（次回ログインから有効）</p>
+        <button type="button" class="btn primary" onclick="saveForm('form-auth','msg-auth')">保存</button>
+        <div id="msg-auth" class="success-msg">✅ 保存しました（次回ログインから有効）</div>
       </form>
     </div>
   </div>
@@ -365,13 +405,13 @@ TEMPLATE = """
 
     // タブ切り替え
     function switchTab(id) {
-      document.querySelectorAll('.tab').forEach((t, i) => t.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      const tabs = document.querySelectorAll('.tab');
-      const map = { detect: 0, telegram: 1, model: 2, auth: 3 };
-      tabs[map[id]].classList.add('active');
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       document.getElementById('tab-' + id).classList.add('active');
-      if(id === 'model') fetchModelInfo();
+      const idx_map = {'detect':0, 'classes':1, 'telegram':2, 'auth':3, 'model':4};
+      document.querySelectorAll('.nav-item')[idx_map[id] || 0].classList.add('active');
+      if (id === 'model') fetchModelInfo();
+      if (id === 'classes') fetchClassesInfo();
     }
 
     // ステータスポーリング
@@ -418,10 +458,13 @@ TEMPLATE = """
       form.querySelectorAll('input').forEach(i => {
         let val = i.value;
         if (i.name === 'detection_threshold') {
-            // UI上の「感度」を「内部閾値」に変換 (感度10=閾値0.05, 感度1=閾値0.95)
             val = 1.05 - parseFloat(i.value);
         }
-        data[i.name] = (i.type === 'number' || i.type === 'range') ? Number(val) : val;
+        if (i.type === 'checkbox') {
+            data[i.name] = i.checked;
+        } else {
+            data[i.name] = (i.type === 'number' || i.type === 'range') ? Number(val) : val;
+        }
       });
       const res = await fetch('/api/config', {
         method: 'POST',
@@ -430,6 +473,67 @@ TEMPLATE = """
       });
       if (res.ok) {
         const msg = document.getElementById(msgId);
+        msg.style.display = 'block';
+        setTimeout(() => msg.style.display = 'none', 2500);
+      }
+    }
+
+    async function fetchClassesInfo() {
+      const area = document.getElementById('classes-list-area');
+      try {
+        const model = await fetch('/api/model').then(r => r.json());
+        const config = await fetch('/api/config').then(r => r.json());
+        if (!model || !config) return;
+
+        const globalClassesMap = model.classes || {};
+        const globalTargetClasses = config.target_classes || [];
+
+        let html = '';
+        Object.keys(globalClassesMap).sort((a,b)=>Number(a)-Number(b)).forEach(id => {
+          const name = globalClassesMap[id];
+          const checked = globalTargetClasses.includes(Number(id)) ? 'checked' : '';
+          html += `
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:5px;"><input type="checkbox" class="cls-target" data-id="${id}" ${checked}></td>
+              <td style="padding:5px; color:var(--muted)">${id}</td>
+              <td style="padding:5px;"><input type="text" class="cls-name" data-id="${id}" value="${name}" 
+                  style="padding:2px 5px; height:24px; font-size:0.75rem;"></td>
+            </tr>
+          `;
+        });
+        area.innerHTML = html;
+      } catch(e) {
+        area.innerHTML = `<tr><td colspan="3" class="red">接続エラー</td></tr>`;
+      }
+    }
+
+    async function saveClasses() {
+      const showAll = document.querySelector('#form-classes [name="show_all_detections"]').checked;
+      const targets = [];
+      document.querySelectorAll('.cls-target:checked').forEach(i => targets.push(Number(i.dataset.id)));
+      
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            "target_classes": targets,
+            "show_all_detections": showAll
+        })
+      });
+
+      const newClasses = {};
+      document.querySelectorAll('.cls-name').forEach(i => {
+        newClasses[i.dataset.id] = i.value;
+      });
+
+      const res = await fetch('/api/classes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(newClasses)
+      });
+
+      if (res.ok) {
+        const msg = document.getElementById('msg-classes');
         msg.style.display = 'block';
         setTimeout(() => msg.style.display = 'none', 2500);
       }
@@ -542,23 +646,54 @@ def api_model():
         return jsonify(detector_instance.get_model_info())
     return jsonify({"status": "error", "message": "Detector not found"})
 
-@app.route('/api/config', methods=['POST'])
+@app.route('/api/classes', methods=['POST'])
+@requires_auth
+def api_classes():
+    data = request.json
+    if not data:
+        return jsonify({"status": "error", "message": "No data received"})
+    
+    # 外部ファイルに保存
+    json_path = os.path.join(os.path.dirname(__file__), 'coco_classes.json')
+    try:
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        
+        # Detector 側のキャッシュも更新
+        if detector_instance:
+            detector_instance.refresh_classes()
+            
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/api/config', methods=['GET', 'POST'])
 @requires_auth
 def api_config():
-    data = request.get_json()
-    allowed_keys = {
-        'detection_threshold', 'notify_interval',
-        'telegram_token', 'telegram_chat_id',
-        'stream_width', 'stream_height',
-        'web_user', 'web_pass',
-    }
-    filtered = {k: v for k, v in data.items() if k in allowed_keys}
-    save_config(filtered)
-    if 'stream_width' in filtered:
-        system_status['stream_width'] = filtered['stream_width']
-    if 'stream_height' in filtered:
-        system_status['stream_height'] = filtered['stream_height']
-    return jsonify({"ok": True})
+    if request.method == 'POST':
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No data"}), 400
+        
+        allowed_keys = {
+            'detection_threshold', 'notify_interval',
+            'telegram_token', 'telegram_chat_id',
+            'stream_width', 'stream_height',
+            'web_user', 'web_pass',
+            'target_classes', 'show_all_detections'
+        }
+        filtered = {k: v for k, v in data.items() if k in allowed_keys}
+        save_config(filtered)
+        
+        if 'stream_width' in filtered:
+            system_status['stream_width'] = filtered['stream_width']
+        if 'stream_height' in filtered:
+            system_status['stream_height'] = filtered['stream_height']
+            
+        return jsonify({"ok": True})
+    
+    # GET の場合は現在の設定を返す
+    return jsonify(load_config())
 
 def _draw_osd(frame):
     """フレームに検知状態・FPS・日時を重畳する。"""
@@ -585,7 +720,7 @@ def _draw_osd(frame):
     frame = cv2.addWeighted(overlay2, 0.55, frame, 0.45, 0)
 
     if human_count > 0:
-        status_text  = f"ALERT: {human_count}"
+        status_text  = f"DETECTED: {human_count}"
         status_color = (50, 80, 255)   # 赤
         # 検知時は枠で警告強調
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (50, 80, 255), 3)
@@ -609,7 +744,7 @@ def generate_frames():
     prev_time = time.time()
     while True:
         # main.py で加工されたフレームがあればそれを優先
-        frame = system_status.get('latest_frame')
+        frame = latest_processed_frame
         
         # なければカメラから直接取得（フォールバック）
         if frame is None and camera_instance:

@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import json
+import os
 
 # TFLite ランタイムを動的にインポート（tflite_runtime または tensorflow.lite を使用）
 try:
@@ -10,8 +12,8 @@ except ImportError:
     except ImportError:
         tflite = None
 
-# COCO データセットのクラスマップ (一部)
-COCO_CLASSES = {
+# COCO データセットのクラスマップ (デフォルト値)
+DEFAULT_CLASSES = {
     1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane',
     6: 'bus', 7: 'train', 8: 'truck', 9: 'boat', 10: 'traffic light',
     11: 'fire hydrant', 13: 'stop sign', 14: 'parking meter', 15: 'bench',
@@ -38,6 +40,8 @@ class HumanDetector:
         self._model_path = model_path
         self.threshold = float(threshold)
         self.interpreter = None
+        self.classes = {} # Initialize as empty, will be loaded by refresh_classes
+        self.refresh_classes() # Load classes from JSON
 
         if tflite is None:
             print("[WARNING] tflite_runtime / tensorflow が見つかりません。モック検知を使用します。")
@@ -167,6 +171,7 @@ class HumanDetector:
         info = {
             "status": "Loaded",
             "path": getattr(self, '_model_path', 'model.tflite'),
+            "classes": self.classes, # クラスマップも含める
             "input": [
                 {
                     "name": d['name'],
@@ -190,17 +195,52 @@ class HumanDetector:
         }
         return info
 
+    def refresh_classes(self):
+        """外部 JSON ファイルからクラスマップを再読み込みする。"""
+        json_path = os.path.join(os.path.dirname(__file__), 'coco_classes.json')
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # キーを数値に変換
+                    self.classes = {int(k): v for k, v in data.items()}
+                print(f"[OK] Loaded {len(self.classes)} classes from {json_path}")
+            except Exception as e:
+                print(f"[ERROR] クラスマップのロードに失敗しました: {e}")
+        else:
+            print(f"[WARNING] coco_classes.json が見つかりません。デフォルトのクラスマップを使用します。")
+            # Fallback to a hardcoded default if the file doesn't exist
+            self.classes = {
+                1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane',
+                6: 'bus', 7: 'train', 8: 'truck', 9: 'boat', 10: 'traffic light',
+                11: 'fire hydrant', 13: 'stop sign', 14: 'parking meter', 15: 'bench',
+                16: 'bird', 17: 'cat', 18: 'dog', 19: 'horse', 20: 'sheep',
+                21: 'cow', 22: 'elephant', 23: 'bear', 24: 'zebra', 25: 'giraffe',
+                27: 'backpack', 28: 'umbrella', 31: 'handbag', 32: 'tie', 33: 'suitcase',
+                34: 'frisbee', 35: 'skis', 36: 'snowboard', 37: 'sports ball', 38: 'kite',
+                39: 'baseball bat', 40: 'baseball glove', 41: 'skateboard', 42: 'surfboard',
+                43: 'tennis racket', 44: 'bottle', 46: 'wine glass', 47: 'cup', 48: 'fork',
+                49: 'knife', 50: 'spoon', 51: 'bowl', 52: 'banana', 53: 'apple',
+                54: 'sandwich', 55: 'orange', 56: 'broccoli', 57: 'carrot', 58: 'hot dog',
+                59: 'pizza', 60: 'donut', 61: 'cake', 62: 'chair', 63: 'couch',
+                64: 'potted plant', 65: 'bed', 67: 'dining table', 70: 'toilet',
+                72: 'tv', 73: 'laptop', 74: 'mouse', 75: 'remote', 76: 'keyboard',
+                77: 'cell phone', 78: 'microwave', 79: 'oven', 80: 'toaster', 81: 'sink',
+                82: 'refrigerator', 84: 'book', 85: 'clock', 86: 'vase', 87: 'scissors',
+                88: 'teddy bear', 89: 'hair drier', 90: 'toothbrush'
+            }
+
     def draw_detections(self, frame, detections):
         for item in detections:
             x, y, bw, bh = item[:4]
             score = item[4]
             class_id = item[5]
             
-            class_name = COCO_CLASSES.get(class_id, f"ID:{class_id}")
+            class_name = self.classes.get(class_id, f"ID:{class_id}")
             color = (0, 220, 50) if class_id == PERSON_CLASS_ID else (220, 150, 0)
             
             cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
-            label = f"{class_name} {score:.0%}"
-            cv2.putText(frame, label, (x, max(y - 8, 12)),
+            label_text = f"{class_name} {int(score * 100)}%"
+            cv2.putText(frame, label_text, (x, max(y - 8, 12)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         return frame
