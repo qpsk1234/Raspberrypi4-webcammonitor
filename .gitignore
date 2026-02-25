@@ -1,0 +1,17 @@
+# Windowsの設定ファイル (Thumbs.db, Desktop.ini等)
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Windowsの隠しフォルダ
+$RECYCLE.BIN/
+
+# Visual Studio関連 (もし使用していれば)
+.vs/
+*.user
+*.suo
+bin/
+obj/
+
+# Windowsのショートカット
+*.lnk
