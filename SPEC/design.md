@@ -6,9 +6,10 @@
 | スレッド/モジュール | 役割 |
 |---|---|
 | カメラキャプチャ・スレッド | OpenCVで映像取得、スレッドセーフなバッファに書き込み |
-| 検知エンジン（メインループ） | バッファからフレームを取得しTFLiteで人間検知 |
-| Web配信・スレッド | FlaskでMJPEGストリーミングおよびWeb管理画面を提供 |
-| 通知/保存モジュール | 検知イベント発生時にTelegram APIへ送信・画像保存 |
+| 検知エンジン（メインループ） | バッファからフレームを取得しTFLiteで人間検知。常時プリ録画バッファを更新 |
+| Web配信・スレッド | FlaskでMJPEGストリーミング、Web管理画面、メディアブラウザを提供 |
+| 録画エンジン (`recorder.py`) | FFmpegサブプロセスへの非同期書き出し、フレーム補完、プリ録画制御 |
+| 通知モジュール (`notifier.py`) | 検知イベント発生時にTelegram APIへ送信（セッション抑制機能付） |
 
 ## 2. テクノロジースタック
 
@@ -29,12 +30,12 @@ project/
 ├── main.py           # エントリーポイント。スレッド制御・検知ループ
 ├── camera.py         # スレッドセーフなカメラキャプチャクラス
 ├── detector.py       # TFLiteを使用した人間検知エンジン
-├── notifier.py       # Telegram通知モジュール
-├── web_stream.py     # Flask Web管理画面・ストリーミング・API
+├── recorder.py       # FFmpegを使用した高度な録画モジュール（非同期・プリ録画対応）
+├── notifier.py       # Telegram通知モジュール（セッション抑制対応）
+├── detection_logger.py # 履歴ログ管理と特定日付の抽出
+├── web_stream.py     # 管理画面・メディアブラウザ・ストリーミング・API
 ├── config.json       # 全設定を管理する外部設定ファイル
-├── requirements.txt  # 依存ライブラリ
-├── setup_model.py    # TFLiteモデルの自動ダウンロードスクリプト
-└── records/          # 検知時の画像・動画の保存先
+└── records/          # 録画（MP4）およびスナップショット（JPG）の保存先
 ```
 
 ## 4. 主要機能の設計
@@ -52,10 +53,11 @@ project/
 
 | URL | メソッド | 説明 |
 |---|---|---|
-| `/` | GET | ダークテーマの管理ダッシュボードを返す |
-| `/video_feed` | GET | MJPEG ストリーミングを返す |
-| `/api/status` | GET | JSON形式で動作ステータスを返す |
-| `/api/config` | POST | JSON形式で設定を受け取り `config.json` を更新 |
+| `/` | GET | リアルタイム監視ダッシュボード |
+| `/media` | GET | 保存済み動画・写真のメディアブラウザ |
+| `/video_feed` | GET | MJPEG ライブストリーミング |
+| `/api/config` | POST | 閾値・解像度・プリ録画・通知等の設定更新 |
+| `/api/media_list` | GET | 保存済みファイルの一覧取得 |
 
 **`/api/status` レスポンス例:**
 ```json
@@ -98,13 +100,16 @@ project/
 ```mermaid
 graph TD
     A[Camera] -->|OpenCV| B[main.py - 検知ループ]
-    B -->|フレーム共有| C[web_stream.py - generate_frames]
-    B --> D{人間を検知?}
-    D -->|Yes| E[detector.draw_detections]
-    D -->|Yes| F[system_status 更新]
-    D -->|Yes| G[notifier.send_photo → Telegram]
-    D -->|Yes| H[records/ に保存]
-    C --> I[ブラウザ: /video_feed MJPEG]
-    F --> J[ブラウザ: /api/status ポーリング]
-    K[ブラウザ: 設定フォーム] -->|POST /api/config| L[config.json 保存]
+    B -->|毎フレーム| C[recorder.update_buffer]
+    C -->|deque| D[プリ録画バッファ]
+    B --> E{ターゲット検知?}
+    E -->|Yes| F[recorder.start_recording]
+    F -->|バッファ放出| G[FFmpeg Process]
+    E -->|Yes| H[notifier.send_photo]
+    B -->|毎フレーム| I[recorder.write]
+    I -->|Queue| J[Async Worker Thread]
+    J -->|pipe| G
+    G -->|libx264| K[records/ .mp4]
+    L[web_stream.py] -->|閲覧| K
+    L -->|閲覧| M[Live Stream]
 ```
