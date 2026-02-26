@@ -40,3 +40,17 @@ class DetectionLogger:
             with open(self.log_path, 'r', encoding='utf-8') as f:
                 rows = list(csv.DictReader(f))
         return list(reversed(rows[-n:]))
+
+    def read_by_date(self, date_str):
+        """指定した日付 (YYYY-MM-DD) のログを新しい順に返す。"""
+        with self._lock:
+            if not os.path.exists(self.log_path):
+                return []
+            results = []
+            with open(self.log_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # timestamp は "YYYY-MM-DD HH:MM:SS" 形式
+                    if row['timestamp'].startswith(date_str):
+                        results.append(row)
+            return list(reversed(results))

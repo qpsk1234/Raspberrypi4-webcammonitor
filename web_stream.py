@@ -207,7 +207,14 @@ TEMPLATE = """
 
       <!-- ログ -->
       <div class="card">
-        <div class="card-header">📋 検知ログ履歴</div>
+        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+          <div>📋 検知ログ履歴 <span id="log-date-display" style="font-size:0.8rem; color:var(--accent2); margin-left:10px;"></span></div>
+          <div style="display:flex; gap:5px;">
+            <button class="btn" style="padding:2px 8px; font-size:0.7rem;" onclick="changeLogDate(-1)">◀ 前日</button>
+            <button class="btn" style="padding:2px 8px; font-size:0.7rem;" onclick="changeLogDate(0)">今日</button>
+            <button class="btn" style="padding:2px 8px; font-size:0.7rem;" onclick="changeLogDate(1)">翌日 ▶</button>
+          </div>
+        </div>
         <div style="overflow-x:auto;">
           <table class="log-table">
             <thead><tr><th>日時</th><th>検知数</th><th>確信度</th><th>メディア</th></tr></thead>
@@ -483,10 +490,27 @@ TEMPLATE = """
     }
     setInterval(pollStatus, 2000); pollStatus();
 
+    // ログ表示対象の日付 (YYYY-MM-DD)
+    let currentLogDate = new Date().toISOString().split('T')[0];
+
+    function changeLogDate(offset) {
+        const d = new Date(currentLogDate);
+        if (offset === 0) {
+            currentLogDate = new Date().toISOString().split('T')[0];
+        } else {
+            d.setDate(d.getDate() + offset);
+            currentLogDate = d.toISOString().split('T')[0];
+        }
+        document.getElementById('log-date-display').textContent = '[' + currentLogDate + ']';
+        pollLogs();
+    }
+    // 初期表示用
+    document.getElementById('log-date-display').textContent = '[' + currentLogDate + ']';
+
     // ログポーリング
     async function pollLogs() {
       try {
-        const rows = await fetch('/api/logs').then(r => r.json());
+        const rows = await fetch(`/api/logs?date=${currentLogDate}`).then(r => r.json());
         if (!rows.length) return;
         document.getElementById('log-body').innerHTML = rows.map(r => {
           const snapLink = r.snapshot_path ? `<a href="/records/${r.snapshot_path.split(/[\\\\/]/).pop()}" target="_blank" title="画像を表示">📷</a>` : '—';
@@ -691,7 +715,13 @@ def api_status():
 @app.route('/api/logs')
 @requires_auth
 def api_logs():
-    rows = logger_instance.read_recent(50) if logger_instance else []
+    date_str = request.args.get('date')
+    if not date_str:
+        date_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    
+    rows = []
+    if logger_instance:
+        rows = logger_instance.read_by_date(date_str)
     return jsonify(rows)
 
 @app.route('/api/notify_test', methods=['POST'])

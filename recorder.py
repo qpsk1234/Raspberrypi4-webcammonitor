@@ -66,12 +66,20 @@ class Recorder:
 
     def schedule_stop(self, override_post_seconds=None):
         """検知が途切れた際に `post_seconds` 後に録画終了をスケジュールする。"""
-        wait_time = override_post_seconds if override_post_seconds is not None else self.post_seconds
         with self._lock:
+            # すでに停止タイマーが動いている場合は何もしない（これにより毎フレームのリセットを防ぐ）
             if self._stop_timer is not None:
-                self._stop_timer.cancel()
-        self._stop_timer = threading.Timer(wait_time, self._stop)
-        self._stop_timer.start()
+                return
+            
+            wait_time = override_post_seconds if override_post_seconds is not None else self.post_seconds
+            self._stop_timer = threading.Timer(wait_time, self._stop_)
+            self._stop_timer.start()
+
+    def _stop_(self):
+        """Timerから呼ばれるラッパー。ロック制御のために _stop を呼ぶ。"""
+        self._stop()
+        with self._lock:
+            self._stop_timer = None
 
     def _stop(self):
         with self._lock:
