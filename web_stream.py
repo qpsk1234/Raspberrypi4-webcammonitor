@@ -118,12 +118,13 @@ TEMPLATE = """
 
     /* タブ */
     .tab-bar { display: flex; border-bottom: 1px solid var(--border); background: #13161f; }
-    .tab {
+    .nav-item {
       flex: 1; padding: 10px 0; text-align: center; font-size: 0.8rem; font-weight: 600;
       color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
-      transition: all .2s;
+      transition: all .2s; background: none; border-top: none; border-left: none; border-right: none;
     }
-    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .nav-item:hover { background: rgba(255,255,255,0.05); }
+    .nav-item.active { color: var(--accent); border-bottom-color: var(--accent); }
     .tab-content { display: none; padding: 20px; }
     .tab-content.active { display: block; }
 
@@ -257,12 +258,12 @@ TEMPLATE = """
 
     <!-- タブ -->
     <div class="tab-bar">
-      <button class="nav-item active" onclick="switchTab('detect')">📹 検知</button>
-      <button class="nav-item" onclick="switchTab('classes')">🍱 クラス</button>
-      <button class="nav-item" onclick="switchTab('recorder')">🎬 録画・保存</button>
-      <button class="nav-item" onclick="switchTab('telegram')">✈️ Telegram</button>
-      <button class="nav-item" onclick="switchTab('auth')">🔐 認証</button>
-      <button class="nav-item" onclick="switchTab('model')">🤖 モデル</button>
+      <button id="nav-detect" class="nav-item active" onclick="switchTab('detect')">📹 検知</button>
+      <button id="nav-classes" class="nav-item" onclick="switchTab('classes')">🍱 クラス</button>
+      <button id="nav-recorder" class="nav-item" onclick="switchTab('recorder')">🎬 録画・保存</button>
+      <button id="nav-telegram" class="nav-item" onclick="switchTab('telegram')">✈️ Telegram</button>
+      <button id="nav-auth" class="nav-item" onclick="switchTab('auth')">🔐 認証</button>
+      <button id="nav-model" class="nav-item" onclick="switchTab('model')">🤖 モデル</button>
     </div>
 
     <!-- 検知設定タブ -->
@@ -350,6 +351,14 @@ TEMPLATE = """
             物体が消えた後、何秒間録画を継続するか指定します。
           </div>
           <input type="number" name="recorder_post_seconds" value="{{ config.get('recorder_post_seconds', 5) }}" min="0" max="60">
+        </div>
+
+        <div class="form-group">
+          <label>録画開始遅延 (ミリ秒)</label>
+          <div style="font-size:0.7rem; color:var(--muted); margin-bottom:8px;">
+            検知した瞬間のノイズによる誤録画を防ぐため、開始を遅らせます（通常 0〜1000ms）。
+          </div>
+          <input type="number" name="recorder_start_delay_ms" value="{{ config.get('recorder_start_delay_ms', 0) }}" min="0" max="5000" step="100">
         </div>
 
         <div class="section-title">スナップショット設定</div>
@@ -453,9 +462,12 @@ TEMPLATE = """
     function switchTab(id) {
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-      document.getElementById('tab-' + id).classList.add('active');
-      const idx_map = {'detect':0, 'classes':1, 'recorder':2, 'telegram':3, 'auth':4, 'model':5};
-      document.querySelectorAll('.nav-item')[idx_map[id] || 0].classList.add('active');
+      
+      const tab = document.getElementById('tab-' + id);
+      const nav = document.getElementById('nav-' + id);
+      if (tab) tab.classList.add('active');
+      if (nav) nav.classList.add('active');
+      
       if (id === 'model') fetchModelInfo();
       if (id === 'classes') fetchClassesInfo();
     }
@@ -514,7 +526,13 @@ TEMPLATE = """
         if (!rows.length) return;
         document.getElementById('log-body').innerHTML = rows.map(r => {
           const snapLink = r.snapshot_path ? `<a href="/records/${r.snapshot_path.split(/[\\\\/]/).pop()}" target="_blank" title="画像を表示">📷</a>` : '—';
-          const videoLink = r.video_path ? `<a href="/records/${r.video_path.split(/[\\\\/]/).pop()}" target="_blank" title="動画を再生">🎬</a>` : '—';
+          let videoLink = '—';
+          if (r.video_path) {
+            const isAvi = r.video_path.toLowerCase().endsWith('.avi');
+            const label = isAvi ? '🎬(AVI)' : '🎬';
+            const title = isAvi ? 'ダウンロードして再生' : '動画を再生';
+            videoLink = `<a href="/records/${r.video_path.split(/[\\\\/]/).pop()}" target="_blank" title="${title}">${label}</a>`;
+          }
           return `<tr>
             <td>${r.timestamp}</td>
             <td>${r.human_count}</td>
@@ -781,7 +799,7 @@ def api_config():
             'stream_width', 'stream_height',
             'web_user', 'web_pass',
             'target_classes', 'show_all_detections',
-            'recorder_post_seconds', 'snapshot_width', 'snapshot_height', 'snapshot_mode'
+            'recorder_post_seconds', 'recorder_start_delay_ms', 'snapshot_width', 'snapshot_height', 'snapshot_mode'
         }
         filtered = {k: v for k, v in data.items() if k in allowed_keys}
         save_config(filtered)

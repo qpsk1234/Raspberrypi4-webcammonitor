@@ -46,6 +46,7 @@ def main():
     print("Web UI: http://0.0.0.0:5000")
 
     last_notify_time = 0
+    detection_session_start = None
 
     try:
         while True:
@@ -71,19 +72,31 @@ def main():
             if draw_list:
                 frame = detector.draw_detections(frame, draw_list)
 
+            # 録画の書き込み（録画中であれば毎フレーム実行）
+            recorder.write(frame)
+
             if target_detections:
                 # 最大スコア算出
                 max_score = max((d[4] for d in target_detections), default=0.0)
 
                 # ステータス更新（Webダッシュボード向け：ターゲット数をカウント）
-                system_status['human_count']      = len(target_detections) # UI上はhuman_countのまま共有
+                system_status['human_count'] = len(target_detections) 
+                if len(target_detections) > system_status.get('human_count_max', 0):
+                    system_status['human_count_max'] = len(target_detections)
+                
                 system_status['detections_total'] += 1
-                system_status['last_detected']    = \
+                system_status['last_detected'] = \
                     datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # 録画（ターゲットがいる時のみ）
-                recorder.start_recording(frame)
-                recorder.write(frame)
+                # 録画開始遅延の判定
+                if detection_session_start is None:
+                    detection_session_start = time.time()
+                
+                elapsed_ms = (time.time() - detection_session_start) * 1000
+                delay_ms = config.get('recorder_start_delay_ms', 0)
+                
+                if elapsed_ms >= delay_ms:
+                    recorder.start_recording(frame)
 
                 # Telegram 通知 と スナップショット保存
                 current_time = time.time()
@@ -115,6 +128,8 @@ def main():
                     last_notify_time = current_time
             else:
                 system_status['human_count'] = 0
+                detection_session_start = None # セッションリセット
+                
                 if recorder.is_recording:
                     # 検知終了時のスナップショット（設定されている場合）
                     if config.get('snapshot_mode') == 'both':
@@ -126,6 +141,9 @@ def main():
                             f"snap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_end.jpg")
                         cv2.imwrite(snap_path, snap_frame)
                         print(f"[Main] Detection ended. Snapshot saved (end): {snap_path}")
+                        
+                        # 検知終了も通知
+                        notifier.send_photo(snap_frame, caption=f"ℹ️ 検知終了\n最終確認時刻: {datetime.datetime.now().strftime('%H:%M:%S')}")
 
                     recorder.schedule_stop(config.get('recorder_post_seconds', 5))
                     # 通知タイマーをリセットして次回の検知に備える（任意だが、通常は検知が一旦途切れたら次は即通知したい場合が多い）
