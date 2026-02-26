@@ -17,6 +17,9 @@
     "show_all_detections": true,
     "recorder_post_seconds": 5,
     "recorder_start_delay_ms": 0,
+    "recorder_width": 1280,
+    "recorder_height": 720,
+    "recorder_pre_frames": 60,
     "snapshot_width": 1280,
     "snapshot_height": 720,
     "snapshot_mode": "start_only"

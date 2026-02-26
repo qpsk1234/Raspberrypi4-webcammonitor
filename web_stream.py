@@ -3,6 +3,7 @@ from functools import wraps
 import cv2
 import json
 import os
+import datetime
 
 app = Flask(__name__)
 camera_instance = None
@@ -49,6 +50,13 @@ TEMPLATE = """
     header h1 { font-size: 1rem; font-weight: 600; }
     .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
     #clock { font-size: 0.8rem; color: var(--muted); }
+    .btn-nav {
+      display: flex; align-items: center; gap: 6px; padding: 7px 16px;
+      background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+      font-size: 0.82rem; font-weight: 600; cursor: pointer; transition: all .2s;
+      text-decoration: none;
+    }
+    .btn-nav:hover { background: var(--border); }
     .btn-settings {
       display: flex; align-items: center; gap: 6px; padding: 7px 16px;
       background: var(--accent); color: #fff; border: none; border-radius: 8px;
@@ -171,6 +179,7 @@ TEMPLATE = """
     <h1>🎥 監視カメラ管理画面</h1>
     <div class="header-right">
       <span id="clock"></span>
+      <a href="/media" class="btn-nav">📂 メディア閲覧</a>
       <button class="btn-settings" id="btn-settings" onclick="toggleSettings()">⚙ 設定</button>
     </div>
   </header>
@@ -354,11 +363,31 @@ TEMPLATE = """
         </div>
 
         <div class="form-group">
+          <label>録画解像度（横x縦）</label>
+          <div style="font-size:0.7rem; color:var(--muted); margin-bottom:8px;">
+            録画データの解像度を指定します（1280x720 推奨）。
+          </div>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <input type="number" name="recorder_width" value="{{ config.get('recorder_width', 1280) }}" min="320" max="1920" step="80" style="flex:1">
+            <span>x</span>
+            <input type="number" name="recorder_height" value="{{ config.get('recorder_height', 720) }}" min="240" max="1080" step="60" style="flex:1">
+          </div>
+        </div>
+
+        <div class="form-group">
           <label>録画開始遅延 (ミリ秒)</label>
           <div style="font-size:0.7rem; color:var(--muted); margin-bottom:8px;">
             検知した瞬間のノイズによる誤録画を防ぐため、開始を遅らせます（通常 0〜1000ms）。
           </div>
           <input type="number" name="recorder_start_delay_ms" value="{{ config.get('recorder_start_delay_ms', 0) }}" min="0" max="5000" step="100">
+        </div>
+
+        <div class="form-group">
+          <label>プリ録画（フレーム枚数）</label>
+          <div style="font-size:0.7rem; color:var(--muted); margin-bottom:8px;">
+            検知した瞬間の何フレーム前（過去）から録画を開始するか指定します（通常 20〜100枚）。
+          </div>
+          <input type="number" name="recorder_pre_frames" value="{{ config.get('recorder_pre_frames', 60) }}" min="0" max="300" step="10">
         </div>
 
         <div class="section-title">スナップショット設定</div>
@@ -523,15 +552,23 @@ TEMPLATE = """
     async function pollLogs() {
       try {
         const rows = await fetch(`/api/logs?date=${currentLogDate}`).then(r => r.json());
-        if (!rows.length) return;
+        if (!rows.length) {
+            document.getElementById('log-body').innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:14px">データなし</td></tr>';
+            return;
+        }
         document.getElementById('log-body').innerHTML = rows.map(r => {
-          const snapLink = r.snapshot_path ? `<a href="/records/${r.snapshot_path.split(/[\\\\/]/).pop()}" target="_blank" title="画像を表示">📷</a>` : '—';
+          // パスからファイル名のみを抽出してリンクを作成（より堅牢に）
+          const getFilename = (p) => p ? p.split(/[\\/]/).pop() : null;
+          const snapFile = getFilename(r.snapshot_path);
+          const videoFile = getFilename(r.video_path);
+
+          const snapLink = snapFile ? `<a href="/records/${snapFile}" target="_blank" title="画像を表示">📷</a>` : '—';
           let videoLink = '—';
-          if (r.video_path) {
-            const isAvi = r.video_path.toLowerCase().endsWith('.avi');
+          if (videoFile) {
+            const isAvi = videoFile.toLowerCase().endsWith('.avi');
             const label = isAvi ? '🎬(AVI)' : '🎬';
             const title = isAvi ? 'ダウンロードして再生' : '動画を再生';
-            videoLink = `<a href="/records/${r.video_path.split(/[\\\\/]/).pop()}" target="_blank" title="${title}">${label}</a>`;
+            videoLink = `<a href="/records/${videoFile}" target="_blank" title="${title}">${label}</a>`;
           }
           return `<tr>
             <td>${r.timestamp}</td>
@@ -678,6 +715,143 @@ TEMPLATE = """
 </html>
 """
 
+MEDIA_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>メディア閲覧 - 監視カメラ</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+      --accent: #4f8ef7; --text: #e2e8f0; --muted: #8892a4;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); padding-bottom: 40px; }
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 12px 24px; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 100;
+    }
+    header h1 { font-size: 1rem; font-weight: 600; }
+    .btn-back {
+      text-decoration: none; color: var(--text); background: var(--border);
+      padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 600;
+    }
+    .container { padding: 24px; max-width: 1200px; margin: 0 auto; }
+    .media-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px;
+    }
+    .media-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      overflow: hidden; cursor: pointer; transition: transform 0.2s;
+    }
+    .media-card:hover { transform: translateY(-3px); border-color: var(--accent); }
+    .media-thumb { width: 100%; height: 140px; background: #000; object-fit: cover; }
+    .media-info { padding: 10px; }
+    .media-name { font-size: 0.75rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .media-meta { font-size: 0.7rem; color: var(--muted); margin-top: 4px; display: flex; justify-content: space-between; }
+    
+    /* モーダル表示 */
+    #viewer {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9);
+      z-index: 1000; flex-direction: column; align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    #viewer.open { display: flex; }
+    #viewer-content { max-width: 90%; max-height: 80%; border-radius: 8px; background: #000; }
+    .viewer-close { position: absolute; top: 20px; right: 20px; color: #fff; font-size: 2rem; cursor: pointer; }
+    .viewer-title { margin-top: 15px; font-size: 0.9rem; color: #fff; }
+    .btn-download { margin-top: 10px; background: var(--accent); color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="btn-back">◀ 戻る</a>
+    <h1>📂 保存済みメディア閲覧</h1>
+  </header>
+  <div class="container">
+    <div id="media-list" class="media-grid">
+      <p style="color:var(--muted)">読み込み中...</p>
+    </div>
+  </div>
+
+  <div id="viewer" onclick="closeViewer()">
+    <span class="viewer-close">✕</span>
+    <div id="viewer-main" onclick="event.stopPropagation()">
+        <!-- 動画または画像がここに挿入される -->
+    </div>
+    <div class="viewer-title" id="viewer-title"></div>
+    <a id="download-link" class="btn-download" href="#" download>ダウンロードして保存</a>
+  </div>
+
+  <script>
+    async function loadMedia() {
+      try {
+        const files = await fetch('/api/media_list').then(r => r.json());
+        const listArea = document.getElementById('media-list');
+        if (!files.length) {
+          listArea.innerHTML = '<p style="color:var(--muted)">保存されたファイルはありません。</p>';
+          return;
+        }
+        listArea.innerHTML = files.map(f => {
+          const isVideo = f.name.match(/\.(mp4|avi)$/i);
+          const icon = isVideo ? '🎬' : '📷';
+          const thumbSrc = isVideo ? '' : `/records/${f.name}`;
+          const thumbHtml = isVideo 
+            ? `<div class="media-thumb" style="display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:2rem;">${icon}</div>`
+            : `<img class="media-thumb" src="${thumbSrc}" loading="lazy">`;
+          
+          return `
+            <div class="media-card" onclick="openViewer('${f.name}', ${!!isVideo})">
+              ${thumbHtml}
+              <div class="media-info">
+                <div class="media-name">${f.name}</div>
+                <div class="media-meta">
+                  <span>${f.size}</span>
+                  <span>${f.date}</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch(e) {
+        document.getElementById('media-list').innerHTML = '<p class="red">エラーが発生しました</p>';
+      }
+    }
+
+    function openViewer(name, isVideo) {
+      const viewer = document.getElementById('viewer');
+      const main = document.getElementById('viewer-main');
+      const title = document.getElementById('viewer-title');
+      const dl = document.getElementById('download-link');
+      
+      const fileUrl = `/records/${name}`;
+      title.textContent = name;
+      dl.href = fileUrl;
+      
+      if (isVideo) {
+        main.innerHTML = `<video id="viewer-content" src="${fileUrl}" controls autoplay></video>`;
+      } else {
+        main.innerHTML = `<img id="viewer-content" src="${fileUrl}">`;
+      }
+      viewer.classList.add('open');
+    }
+
+    function closeViewer() {
+      const viewer = document.getElementById('viewer');
+      const main = document.getElementById('viewer-main');
+      main.innerHTML = '';
+      viewer.classList.remove('open');
+    }
+
+    loadMedia();
+  </script>
+</body>
+</html>
+"""
+
 # ============================================================
 # Basic 認証ヘルパー
 # ============================================================
@@ -799,7 +973,9 @@ def api_config():
             'stream_width', 'stream_height',
             'web_user', 'web_pass',
             'target_classes', 'show_all_detections',
-            'recorder_post_seconds', 'recorder_start_delay_ms', 'snapshot_width', 'snapshot_height', 'snapshot_mode'
+            'recorder_post_seconds', 'recorder_start_delay_ms',
+            'recorder_width', 'recorder_height', 'recorder_pre_frames',
+            'snapshot_width', 'snapshot_height', 'snapshot_mode'
         }
         filtered = {k: v for k, v in data.items() if k in allowed_keys}
         save_config(filtered)
@@ -900,6 +1076,35 @@ def generate_frames():
 @requires_auth
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/media')
+@requires_auth
+def media_browser():
+    return render_template_string(MEDIA_TEMPLATE)
+
+@app.route('/api/media_list')
+@requires_auth
+def api_media_list():
+    config = load_config()
+    save_dir = config.get('save_directory', 'records')
+    if not os.path.exists(save_dir):
+        return jsonify([])
+    
+    files = []
+    for filename in os.listdir(save_dir):
+        if filename.lower().endswith(('.jpg', '.mp4', '.avi')):
+            path = os.path.join(save_dir, filename)
+            stat = os.stat(path)
+            files.append({
+                "name": filename,
+                "size": f"{stat.st_size / (1024*1024):.1f} MB" if stat.st_size > 1024*1024 else f"{stat.st_size / 1024:.0f} KB",
+                "mtime": stat.st_mtime,
+                "date": datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+            })
+    
+    # 日付の降順でソート
+    files.sort(key=lambda x: x['mtime'], reverse=True)
+    return jsonify(files)
 
 def run_server(cam, logger=None, detector=None, notifier=None):
     global camera_instance, logger_instance, detector_instance, notifier_instance

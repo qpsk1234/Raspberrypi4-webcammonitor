@@ -2,108 +2,160 @@ import cv2
 import os
 import datetime
 import threading
+import time
+import queue
+from collections import deque
 
 class Recorder:
     """
-    人間検知中に映像を録画するモジュール。
-    検知が途切れた後も `post_seconds` 秒間だけ録画を継続する（後バッファ）。
+    非同期書き込み、フレーム補完、およびプリ録画（検知前録画）に対応した録画モジュール。
     """
-    def __init__(self, save_directory='records', fps=20.0, resolution=(640, 480), post_seconds=5):
+    def __init__(self, save_directory='records', fps=20.0, resolution=(1280, 720), post_seconds=5, pre_frames=60):
         self.save_directory = save_directory
         self.fps = fps
         self.resolution = resolution
         self.post_seconds = post_seconds
+        self.frame_duration = 1.0 / fps
+        self.pre_frames = pre_frames
 
         self._writer = None
         self._lock = threading.Lock()
         self._stop_timer = None
         self.is_recording = False
-        self.current_video_path = None # 現在または直前の録画パス
+        self.current_video_path = None
+        
+        # 非同期処理用
+        self._queue = queue.Queue(maxsize=500) # プリ録画バッファ分を考慮して余裕を持たせる
+        self._running = True
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+        
+        # プリ録画バッファ (リングバッファ)
+        self._pre_buffer = deque(maxlen=pre_frames)
+        
+        # フレーム補完用
+        self._last_frame_time = 0
+        self._last_frame = None
 
         os.makedirs(save_directory, exist_ok=True)
 
-    def _new_filepath(self):
-        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        return os.path.join(self.save_directory, f"detected_{ts}.mp4")
+    def _worker(self):
+        """バックグラウンドでQueueからフレームを取り出して書き込むスレッド"""
+        while self._running:
+            try:
+                item = self._queue.get(timeout=0.1)
+                if item is None: break
+                
+                writer, frame = item
+                if writer is not None:
+                    try:
+                        writer.write(frame)
+                    except Exception as e:
+                        print(f"[Recorder Worker] Write error: {e}")
+                
+                self._queue.task_done()
+            except queue.Empty:
+                continue
+
+    def update_buffer(self, frame):
+        """常時呼び出し。リングバッファを更新する。"""
+        if frame is None: return
+        # リサイズして保存（メモリ節約と書き込み負荷軽減のため）
+        resized = cv2.resize(frame, self.resolution)
+        with self._lock:
+            self._pre_buffer.append(resized)
 
     def start_recording(self, frame):
-        """録画を開始する。既に録画中の場合はタイマーをリセットするだけ。"""
+        """録画を開始する。"""
         with self._lock:
-            # すでに録画終了待ちならタイマーキャンセルして継続
             if self._stop_timer is not None:
                 self._stop_timer.cancel()
                 self._stop_timer = None
                 return
 
             if self._writer is None:
-                # 候補となる (コーデック, 拡張子) のリスト
-                # ユーザー環境のテスト結果: MJPG が動作したため、MJPG を手厚く。
-                # avc1/mp4v はブラウザ互換性が高いが、OpenCV環境によって失敗しやすい。
                 candidates = [
-                    ('avc1', '.mp4'), # H.264 (ブラウザ最適)
-                    ('mp4v', '.mp4'), # MP4 (高い互換性)
-                    ('MJPG', '.mp4'), # MJPG in MP4 (ユーザー環境で期待)
-                    ('MJPG', '.avi'), # MJPG in AVI (確実に動作する可能性大)
-                    ('XVID', '.avi'), # 汎用AVI
+                    ('avc1', '.mp4'),
+                    ('mp4v', '.mp4'),
+                    ('MJPG', '.mp4'),
+                    ('MJPG', '.avi'),
                 ]
                 
                 base_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 
                 for codec, ext in candidates:
                     filepath = os.path.join(self.save_directory, f"detected_{base_ts}{ext}")
-                    
                     try:
                         fourcc = cv2.VideoWriter_fourcc(*codec)
-                        self._writer = cv2.VideoWriter(
-                            filepath, fourcc, self.fps, self.resolution)
+                        w = cv2.VideoWriter(filepath, fourcc, self.fps, self.resolution)
                         
-                        if self._writer is not None and self._writer.isOpened():
-                            print(f"[Recorder] 録画開始成功: {codec} ({filepath})")
+                        if w.isOpened():
+                            print(f"[Recorder] Start (Async+Pre): {codec} ({filepath}) PreFrames: {len(self._pre_buffer)}")
+                            self._writer = w
                             self.current_video_path = filepath
                             self.is_recording = True
+                            
+                            # プリ録画バッファの中身をQueueに一気に投入
+                            for f in self._pre_buffer:
+                                self._push_to_queue(f)
+                            
+                            self._last_frame_time = time.time()
+                            self._last_frame = None
                             return
                         else:
-                            if self._writer: self._writer.release()
-                            self._writer = None
-                    except Exception as e:
-                        # 既知の「VIDEOIO(CV_IMAGES)」警告等は無視し、詳細ログは出さない
-                        if self._writer: self._writer.release()
-                        self._writer = None
+                            w.release()
+                    except:
+                        pass
                 
-                print(f"[CRITICAL] Recorder: 全てのコーデック・拡張子の組み合わせで失敗しました。")
+                print("[CRITICAL] Recorder: Failed to open any VideoWriter.")
                 self.is_recording = False
 
     def write(self, frame):
-        """フレームを書き込む。"""
+        """フレーム補完を行いながらQueueに投入。"""
         if not self.is_recording:
             return
-            
-        with self._lock:
-            if self._writer is not None:
-                try:
-                    # 解像度が一致している必要がある
-                    resized = cv2.resize(frame, self.resolution)
-                    self._writer.write(resized)
-                except Exception as e:
-                    print(f"[ERROR] Recorder.write で例外発生: {e}")
 
-    def schedule_stop(self, override_post_seconds=None):
-        """検知が途切れた際に `post_seconds` 後に録画終了をスケジュールする。"""
+        now = time.time()
+        
         with self._lock:
-            if not self.is_recording:
+            if self._writer is None:
                 return
             
-            # すでに停止タイマーが動いている場合は何もしない（二重設定防止）
-            if self._stop_timer is not None:
+            # 初回フレーム
+            if self._last_frame is None:
+                self._last_frame_time = now
+                self._last_frame = cv2.resize(frame, self.resolution)
+                self._push_to_queue(self._last_frame)
+                return
+
+            elapsed = now - self._last_frame_time
+            num_frames = int(elapsed / self.frame_duration)
+
+            if num_frames > 0:
+                resized = cv2.resize(frame, self.resolution)
+                for i in range(num_frames - 1):
+                    self._push_to_queue(self._last_frame)
+                
+                self._push_to_queue(resized)
+                self._last_frame = resized
+                self._last_frame_time += num_frames * self.frame_duration
+
+    def _push_to_queue(self, frame):
+        try:
+            self._queue.put_nowait((self._writer, frame))
+        except queue.Full:
+            pass
+
+    def schedule_stop(self, override_post_seconds=None):
+        with self._lock:
+            if not self.is_recording or self._stop_timer is not None:
                 return
             
             wait_time = override_post_seconds if override_post_seconds is not None else self.post_seconds
-            print(f"[Recorder] 録画終了をスケジュール ({wait_time}秒後)")
-            self._stop_timer = threading.Timer(wait_time, self._stop_)
+            self._stop_timer = threading.Timer(wait_time, self._stop_callback)
             self._stop_timer.start()
 
-    def _stop_(self):
-        """Timerから呼ばれるラッパー。"""
+    def _stop_callback(self):
         self._stop()
         with self._lock:
             self._stop_timer = None
@@ -111,19 +163,17 @@ class Recorder:
     def _stop(self):
         with self._lock:
             if self._writer is not None:
-                try:
-                    self._writer.release()
-                except Exception as e:
-                    print(f"[ERROR] Recorder release でエラー: {e}")
-                
+                self._queue.join()
+                self._writer.release()
                 self._writer = None
                 self.is_recording = False
-                print(f"[Recorder] 録画終了・保存完了: {self.current_video_path}")
+                self._last_frame = None
+                print(f"[Recorder] Saved (with Pre): {self.current_video_path}")
 
     def release(self):
-        """アプリ終了時に呼ぶ。"""
-        print("[Recorder] システム終了に伴うリリース処理")
         if self._stop_timer:
             self._stop_timer.cancel()
-            self._stop_timer = None
         self._stop()
+        self._running = False
+        self._queue.put(None)
+        self._thread.join()
