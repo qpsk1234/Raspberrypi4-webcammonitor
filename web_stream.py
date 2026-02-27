@@ -468,8 +468,19 @@ TEMPLATE = """
       </div>
       <button type="button" class="btn" style="margin-top:20px;" onclick="fetchModelInfo()">情報を更新</button>
     </div>
-
-      <button type="button" class="btn primary" onclick="saveForm('form-auth','msg-auth')">保存</button>
+    <!-- 認証タブ -->
+    <div id="tab-auth" class="tab-content">
+      <form id="form-auth">
+        <div class="section-title">Web管理画面 ログイン設定</div>
+        <div class="form-group">
+          <label>ユーザー名</label>
+          <input type="text" name="web_user" value="{{ config.get('web_user','admin') }}">
+        </div>
+        <div class="form-group">
+          <label>パスワード</label>
+          <input type="text" name="web_pass" value="{{ config.get('web_pass','admin') }}">
+        </div>
+        <button type="button" class="btn primary" onclick="saveForm('form-auth','msg-auth')">保存</button>
         <div id="msg-auth" class="success-msg">✅ 保存しました（次回ログインから有効）</div>
       </form>
     </div>
