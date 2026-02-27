@@ -6,9 +6,9 @@
 | スレッド/モジュール | 役割 |
 |---|---|
 | カメラキャプチャ・スレッド | OpenCVで映像取得、スレッドセーフなバッファに書き込み |
-| 検知エンジン（メインループ） | バッファからフレームを取得しTFLiteで人間検知。常時プリ録画バッファを更新 |
+| 検知エンジン（メインループ） | バッファからフレームを取得しTFLiteで人間検知。常時プリ録画バッファ（タイムスタンプ付）を更新 |
 | Web配信・スレッド | FlaskでMJPEGストリーミング、Web管理画面、メディアブラウザを提供 |
-| 録画エンジン (`recorder.py`) | FFmpegサブプロセスへの非同期書き出し、フレーム補完、プリ録画制御 |
+| 録画エンジン (`recorder.py`) | FFmpegの非同期起動、タイムスタンプベースの精密FPS同期、非同期連鎖書き出し |
 | 通知モジュール (`notifier.py`) | 検知イベント発生時にTelegram APIへ送信（セッション抑制機能付） |
 
 ## 2. テクノロジースタック
@@ -101,15 +101,13 @@ project/
 graph TD
     A[Camera] -->|OpenCV| B[main.py - 検知ループ]
     B -->|毎フレーム| C[recorder.update_buffer]
-    C -->|deque| D[プリ録画バッファ]
+    C -->|Timestamp + Frame| D[プリ録画バッファ]
     B --> E{ターゲット検知?}
     E -->|Yes| F[recorder.start_recording]
-    F -->|バッファ放出| G[FFmpeg Process]
-    E -->|Yes| H[notifier.send_photo]
+    F -->|Thread| G[Async FFmpeg Startup]
+    G -->|実時間同期投入| H[FFmpeg Process]
     B -->|毎フレーム| I[recorder.write]
     I -->|Queue| J[Async Worker Thread]
-    J -->|pipe| G
-    G -->|libx264| K[records/ .mp4]
-    L[web_stream.py] -->|閲覧| K
-    L -->|閲覧| M[Live Stream]
+    J -->|pipe| H
+    H -->|libx264| K[records/ .mp4]
 ```

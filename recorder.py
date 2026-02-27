@@ -9,7 +9,7 @@ from collections import deque
 
 class Recorder:
     """
-    FFmpegパイプ、非同期書き込み、フレーム補完、およびプリ録画に対応した録画モジュール。
+    FFmpegパイプ、非同期書き込み、精密フレーム補完(FPS同期)、およびプリ録画に対応した録画モジュール。
     """
     def __init__(self, save_directory='records', fps=20.0, resolution=(1280, 720), post_seconds=5, pre_frames=60):
         self.save_directory = save_directory
@@ -23,19 +23,21 @@ class Recorder:
         self._lock = threading.Lock()
         self._stop_timer = None
         self.is_recording = False
+        self._starting = False # 起動処理中フラグ
         self.current_video_path = None
         
         # 非同期処理用
-        self._queue = queue.Queue(maxsize=500)
+        self._queue = queue.Queue(maxsize=2000) # 補完フレーム増を考慮して拡張
         self._running = True
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
         
-        # プリ録画バッファ (リングバッファ)
+        # プリ録画バッファ (リングバッファ) : (timestamp, frame)
         self._pre_buffer = deque(maxlen=pre_frames)
         
-        # フレーム補完用
-        self._last_frame_time = 0
+        # 精密同期用
+        self._start_session_time = 0
+        self._total_frames_pushed = 0
         self._last_frame = None
 
         os.makedirs(save_directory, exist_ok=True)
@@ -45,13 +47,17 @@ class Recorder:
         while self._running:
             try:
                 item = self._queue.get(timeout=0.1)
-                if item is None: break
+                if item is None:
+                    self._queue.task_done()
+                    break
                 
-                process, frame = item
-                if process is not None and process.poll() is None:
+                proc = self._process
+                frame = item[1]
+
+                if proc is not None:
                     try:
-                        # OpenCV(BGR) -> FFmpegへ生データを書き出す
-                        process.stdin.write(frame.tobytes())
+                        if proc.poll() is None:
+                            proc.stdin.write(frame.tobytes())
                     except Exception as e:
                         print(f"[Recorder Worker] FFmpeg Pipe error: {e}")
                 
@@ -60,95 +66,115 @@ class Recorder:
                 continue
 
     def update_buffer(self, frame):
-        """常時呼び出し。リングバッファを更新する。"""
+        """常時呼び出し。タイムスタンプと共にリングバッファを更新する。"""
         if frame is None: return
-        # リサイズして保存
+        now = time.time()
         resized = cv2.resize(frame, self.resolution)
         with self._lock:
-            self._pre_buffer.append(resized)
+            self._pre_buffer.append((now, resized))
 
     def start_recording(self, frame):
-        """録画を開始する（FFmpegプロセスの起動）。"""
+        """録画を開始する（非同期プロセス起動）。"""
         with self._lock:
             if self._stop_timer is not None:
                 self._stop_timer.cancel()
                 self._stop_timer = None
                 return
 
-            if self._process is None:
-                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                filepath = os.path.join(self.save_directory, f"detected_{ts}.mp4")
+            if self.is_recording or self._starting:
+                return
+
+            self._starting = True
+            self.is_recording = True
+            self._total_frames_pushed = 0
+            
+            # 非同期でFFmpegを起動
+            threading.Thread(target=self._async_start_ffmpeg, daemon=True).start()
+
+    def _async_start_ffmpeg(self):
+        """FFmpegを別スレッドで起動し、バッファを同期的に流し込む。"""
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        filepath = os.path.join(self.save_directory, f"detected_{ts}.mp4")
+        
+        cmd = [
+            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-s', f"{self.resolution[0]}x{self.resolution[1]}",
+            '-pix_fmt', 'bgr24', '-r', str(self.fps),
+            '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+            '-preset', 'ultrafast', '-tune', 'zerolatency',
+            '-f', 'mp4', filepath
+        ]
+        
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            
+            with self._lock:
+                self._process = proc
                 self.current_video_path = filepath
+                self._starting = False
                 
-                # FFmpeg コマンド構築
-                # bgr24 (OpenCV) -> yuv420p (H.264標準)
-                cmd = [
-                    'ffmpeg',
-                    '-y', # Overwrite
-                    '-f', 'rawvideo',
-                    '-vcodec', 'rawvideo',
-                    '-s', f"{self.resolution[0]}x{self.resolution[1]}",
-                    '-pix_fmt', 'bgr24',
-                    '-r', str(self.fps),
-                    '-i', '-', # Stdin
-                    '-c:v', 'libx264',
-                    '-pix_fmt', 'yuv420p', # ブラウザ互換性
-                    '-preset', 'ultrafast', # 低負荷
-                    '-f', 'mp4',
-                    filepath
-                ]
-                
-                try:
-                    self._process = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                # プリ録画バッファのFPS同期投入
+                if len(self._pre_buffer) > 0:
+                    # 最初のフレームを基準にする
+                    buffer_copy = list(self._pre_buffer)
+                    start_t = buffer_copy[0][0]
+                    self._start_session_time = start_t
                     
-                    if self._process:
-                        print(f"[Recorder] FFmpeg Started: {filepath}")
-                        self.is_recording = True
-                        
-                        # プリ録画バッファをQueueへ
-                        for f in self._pre_buffer:
-                            self._push_to_queue(f)
-                        
-                        self._last_frame_time = time.time()
-                        self._last_frame = None
-                except Exception as e:
-                    print(f"[ERROR] Failed to launch FFmpeg: {e}")
-                    self.is_recording = False
+                    for t, f in buffer_copy:
+                        self._sync_write(t, f)
+                else:
+                    self._start_session_time = time.time()
+                    
+                print(f"[Recorder] Synced Recording Started: {filepath}")
+
+        except Exception as e:
+            print(f"[ERROR] Failed to launch FFmpeg: {e}")
+            with self._lock:
+                self._starting = False
+                self.is_recording = False
 
     def write(self, frame):
-        """フレーム補完を行いながらQueueに投入。"""
+        """実時間に基づいた精密補完を行いながらQueueに投入。"""
         if not self.is_recording:
             return
-
-        now = time.time()
         
+        now = time.time()
         with self._lock:
-            if self._process is None:
-                return
-            
-            # 初回フレーム
-            if self._last_frame is None:
-                self._last_frame_time = now
-                self._last_frame = cv2.resize(frame, self.resolution)
+            # プロセス起動中も同期処理を実行してQueueに積む
+            self._sync_write(now, frame)
+
+    def _sync_write(self, timestamp, frame):
+        """
+        指定されたタイムスタンプと現在のセッション開始時刻の差分から、
+        出力すべきフレーム数を計算してQueueに投入する（FPS平準化）。
+        """
+        if self._last_frame is None:
+            # セッション一番最初のフレーム
+            self._last_frame = cv2.resize(frame, self.resolution)
+            self._push_to_queue(self._last_frame)
+            self._total_frames_pushed = 1
+            return
+
+        # セッション開始からの理想的な累積フレーム数
+        elapsed = timestamp - self._start_session_time
+        target_total_frames = int(elapsed * self.fps) + 1
+        
+        # 不足しているフレーム数（ドロップ補完）
+        needed = target_total_frames - self._total_frames_pushed
+        
+        if needed > 0:
+            resized = cv2.resize(frame, self.resolution)
+            # 不足分は「直前のフレーム」で埋める（最後の1枚だけ「今のフレーム」にする）
+            for _ in range(needed - 1):
                 self._push_to_queue(self._last_frame)
-                return
-
-            elapsed = now - self._last_frame_time
-            num_frames = int(elapsed / self.frame_duration)
-
-            if num_frames > 0:
-                resized = cv2.resize(frame, self.resolution)
-                for i in range(num_frames - 1):
-                    self._push_to_queue(self._last_frame)
-                
-                self._push_to_queue(resized)
-                self._last_frame = resized
-                self._last_frame_time += num_frames * self.frame_duration
+            
+            self._push_to_queue(resized)
+            self._last_frame = resized
+            self._total_frames_pushed = target_total_frames
 
     def _push_to_queue(self, frame):
         try:
-            self._queue.put_nowait((self._process, frame))
+            self._queue.put_nowait((None, frame))
         except queue.Full:
             pass
 
@@ -167,12 +193,15 @@ class Recorder:
             self._stop_timer = None
 
     def _stop(self):
+        # 起動中の場合は完了を待つ
+        retries = 20
+        while self._starting and retries > 0:
+            time.sleep(0.5)
+            retries -= 1
+
         with self._lock:
             if self._process is not None:
-                # Queueが完全に消化されるのを待つ
                 self._queue.join()
-                
-                # パイプを閉じてFFmpegを終了させる
                 try:
                     if self._process.stdin:
                         self._process.stdin.close()
@@ -183,7 +212,8 @@ class Recorder:
                 self._process = None
                 self.is_recording = False
                 self._last_frame = None
-                print(f"[Recorder] Saved (FFmpeg MP4): {self.current_video_path}")
+                self._total_frames_pushed = 0
+                print(f"[Recorder] Saved (Synced): {self.current_video_path}")
 
     def release(self):
         if self._stop_timer:
@@ -191,4 +221,7 @@ class Recorder:
         self._stop()
         self._running = False
         self._queue.put(None)
-        self._thread.join()
+        try:
+            self._thread.join(timeout=2)
+        except:
+            pass
