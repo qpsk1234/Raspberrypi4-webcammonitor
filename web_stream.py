@@ -4,6 +4,11 @@ import cv2
 import json
 import os
 import datetime
+import threading
+import shutil
+import time
+from werkzeug.utils import secure_filename
+from detector import HumanDetector
 
 app = Flask(__name__)
 camera_instance = None
@@ -19,6 +24,15 @@ system_status = {
     "stream_height": 480,
 }
 latest_processed_frame = None  # 加工済みフレームの共有用 (JSONシリアライズ対象外)
+
+UPLOAD_FOLDER = 'Uploads'
+TMP_TEST_FOLDER = 'tmp_test'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(TMP_TEST_FOLDER, exist_ok=True)
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['TMP_TEST_FOLDER'] = TMP_TEST_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 # 100MB limit
 
 # ============================================================
 # HTML テンプレート
@@ -273,6 +287,7 @@ TEMPLATE = """
       <button id="nav-telegram" class="nav-item" onclick="switchTab('telegram')">✈️ Telegram</button>
       <button id="nav-auth" class="nav-item" onclick="switchTab('auth')">🔐 認証</button>
       <button id="nav-model" class="nav-item" onclick="switchTab('model')">🤖 モデル</button>
+      <button id="nav-test" class="nav-item" onclick="switchTab('test')">🧪 検証・テスト</button>
     </div>
 
     <!-- 検知設定タブ -->
@@ -454,21 +469,46 @@ TEMPLATE = """
       <button type="button" class="btn" style="margin-top:20px;" onclick="fetchModelInfo()">情報を更新</button>
     </div>
 
-    <!-- 認証タブ -->
-    <div id="tab-auth" class="tab-content">
-      <form id="form-auth">
-        <div class="section-title">Web管理画面 ログイン設定</div>
-        <div class="form-group">
-          <label>ユーザー名</label>
-          <input type="text" name="web_user" value="{{ config.get('web_user','admin') }}">
-        </div>
-        <div class="form-group">
-          <label>パスワード</label>
-          <input type="text" name="web_pass" value="{{ config.get('web_pass','admin') }}">
-        </div>
-        <button type="button" class="btn primary" onclick="saveForm('form-auth','msg-auth')">保存</button>
+      <button type="button" class="btn primary" onclick="saveForm('form-auth','msg-auth')">保存</button>
         <div id="msg-auth" class="success-msg">✅ 保存しました（次回ログインから有効）</div>
       </form>
+    </div>
+
+    <!-- 🧪 検証・テストタブ -->
+    <div id="tab-test" class="tab-content">
+      <div class="section-title">モデル管理 (永続保持)</div>
+      <div class="form-group">
+        <label>新しいモデルをアップロード (.tflite)</label>
+        <div style="display:flex; gap:10px;">
+          <input type="file" id="model-upload-input" accept=".tflite" style="font-size:0.8rem; flex:1;">
+          <button class="btn" onclick="uploadModel()" style="padding:4px 12px; background:var(--accent2); color:white;">UP</button>
+        </div>
+      </div>
+      <div id="model-list-area" style="margin-bottom:20px;">
+        <!-- JSでモデル一覧を表示 -->
+      </div>
+
+      <div class="section-title">検知テスト (一時実行)</div>
+      <div class="form-group">
+        <label>テスト用ファイルを選択 (画像/動画)</label>
+        <input type="file" id="test-media-input" accept="image/*,video/*">
+      </div>
+      <div class="form-group">
+        <label>使用するモデル</label>
+        <select id="test-model-select" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:8px;">
+          <option value="model.tflite">初期モデル (model.tflite)</option>
+        </select>
+      </div>
+      <button class="btn primary" id="btn-run-test" onclick="runDetectionTest()">検知テストを実行</button>
+      
+      <div id="test-result-area" style="margin-top:20px; display:none;">
+        <div class="section-title">テスト結果</div>
+        <div id="test-status-msg" style="font-size:0.85rem; margin-bottom:10px; color:var(--accent2);"></div>
+        <div id="test-preview-container" style="background:#000; border-radius:8px; overflow:hidden; min-height:100px; display:flex; align-items:center; justify-content:center;">
+          <!-- プレビュー表示 -->
+        </div>
+        <div id="test-stats-report" style="margin-top:10px; font-size:0.75rem; color:var(--muted); font-family:monospace; background:var(--bg); padding:10px; border-radius:6px; white-space:pre-wrap;"></div>
+      </div>
     </div>
   </div>
 
@@ -511,6 +551,102 @@ TEMPLATE = """
       
       if (id === 'model') fetchModelInfo();
       if (id === 'classes') fetchClassesInfo();
+      if (id === 'test') { updateModelList(); }
+    }
+
+    // --- モデル管理機能 ---
+    async function updateModelList() {
+      const area = document.getElementById('model-list-area');
+      const select = document.getElementById('test-model-select');
+      try {
+        const models = await fetch('/api/test/models').then(r => r.json());
+        let html = '<table class="model-info-table"><tr><th>ファイル名</th><th>操作</th></tr>';
+        
+        // selectメニューのリセット
+        select.innerHTML = '<option value="model.tflite">初期モデル (model.tflite)</option>';
+        
+        models.forEach(m => {
+          html += `<tr>
+            <td style="font-size:0.8rem;">${m}</td>
+            <td><button class="btn" style="padding:2px 8px; font-size:0.7rem; background:#e25555; color:white;" onclick="deleteModel('${m}')">削除</button></td>
+          </tr>`;
+          if(m !== 'model.tflite') {
+            const opt = document.createElement('option');
+            opt.value = 'Uploads/' + m;
+            opt.textContent = m;
+            select.appendChild(opt);
+          }
+        });
+        html += '</table>';
+        area.innerHTML = html;
+      } catch(e) { area.innerHTML = "モデル一覧の取得に失敗"; }
+    }
+
+    async function uploadModel() {
+      const input = document.getElementById('model-upload-input');
+      if (!input.files[0]) return alert("ファイルを選択してください");
+      const formData = new FormData();
+      formData.append('file', input.files[0]);
+      try {
+        const res = await fetch('/api/test/model_upload', { method:'POST', body:formData }).then(r=>r.json());
+        if(res.ok) { alert("アップロード完了"); updateModelList(); input.value = ''; }
+        else { alert("エラー: " + res.error); }
+      } catch(e) { alert("接続エラー"); }
+    }
+
+    async function deleteModel(name) {
+      if(!confirm(`${name} を削除しますか？`)) return;
+      try {
+        const res = await fetch(`/api/test/model_delete?name=${name}`, { method:'DELETE' }).then(r=>r.json());
+        if(res.ok) { updateModelList(); }
+        else { alert("削除エラー"); }
+      } catch(e) { alert("接続エラー"); }
+    }
+
+    // --- 検知テスト実行 ---
+    async function runDetectionTest() {
+      const mediaInput = document.getElementById('test-media-input');
+      const modelSelect = document.getElementById('test-model-select');
+      if (!mediaInput.files[0]) return alert("テスト用ファイルを選択してください");
+      
+      const btn = document.getElementById('btn-run-test');
+      const resArea = document.getElementById('test-result-area');
+      const statusMsg = document.getElementById('test-status-msg');
+      const preview = document.getElementById('test-preview-container');
+      const report = document.getElementById('test-stats-report');
+
+      btn.disabled = true;
+      btn.textContent = "処理中...";
+      resArea.style.display = 'block';
+      statusMsg.textContent = "ファイルをアップロードし、推論を実行しています...";
+      preview.innerHTML = '<div class="stat-value blue" style="padding:40px;">⏳ Processing...</div>';
+      report.textContent = "";
+
+      const formData = new FormData();
+      formData.append('file', mediaInput.files[0]);
+      formData.append('model_path', modelSelect.value);
+
+      try {
+        const res = await fetch('/api/test/run', { method:'POST', body:formData }).then(r=>r.json());
+        if(res.ok) {
+          statusMsg.textContent = `完了: ${res.filename} (推論速度: ${res.avg_inf_ms}ms)`;
+          const isVideo = res.result_url.match(/\.(mp4|avi)$/i);
+          if (isVideo) {
+            preview.innerHTML = `<video src="${res.result_url}" controls style="width:100%; max-height:400px;"></video>`;
+          } else {
+            preview.innerHTML = `<img src="${res.result_url}" style="width:100%; max-height:400px; object-fit:contain;">`;
+          }
+          report.textContent = "検知統計:\n" + JSON.stringify(res.stats, null, 2);
+        } else {
+          statusMsg.textContent = "エラー: " + res.error;
+          preview.innerHTML = '<div class="red">Failed</div>';
+        }
+      } catch(e) {
+        statusMsg.textContent = "接続エラーが発生しました";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "検知テストを実行";
+      }
     }
 
     async function sendTestNotify() {
@@ -1001,6 +1137,164 @@ def api_config():
     
     # GET の場合は現在の設定を返す
     return jsonify(load_config())
+
+# ============================================================
+# モデルテスト・管理用 API
+# ============================================================
+
+@app.route('/api/test/models', methods=['GET'])
+@requires_auth
+def api_test_models():
+    """保存されているモデルの一覧を返す"""
+    files = []
+    # デフォルトモデル
+    if os.path.exists('model.tflite'):
+        files.append('model.tflite')
+    
+    # アップロードされたモデル
+    if os.path.exists(UPLOAD_FOLDER):
+        for f in os.listdir(UPLOAD_FOLDER):
+            if f.endswith('.tflite'):
+                files.append(f)
+    return jsonify(files)
+
+@app.route('/api/test/model_upload', methods=['POST'])
+@requires_auth
+def api_test_model_upload():
+    """モデルファイルをアップロードする"""
+    if 'file' not in request.files:
+        return jsonify({"ok": False, "error": "No file"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"ok": False, "error": "No filename"}), 400
+    if not file.filename.endswith('.tflite'):
+        return jsonify({"ok": False, "error": "Invalid file type"}), 400
+    
+    filename = secure_filename(file.filename)
+    path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(path)
+    return jsonify({"ok": True})
+
+@app.route('/api/test/model_delete', methods=['DELETE'])
+@requires_auth
+def api_test_model_delete():
+    """モデルファイルを削除する"""
+    name = request.args.get('name')
+    if not name: return jsonify({"ok": False}), 400
+    
+    # 安全のためパスを制限
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(name))
+    if os.path.exists(path):
+        os.remove(path)
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "Not found"}), 404
+
+@app.route('/api/test/run', methods=['POST'])
+@requires_auth
+def api_test_run():
+    """アップロードされたメディアに対して検知テストを実行する"""
+    if 'file' not in request.files:
+        return jsonify({"ok": False, "error": "No file"}), 400
+    
+    file = request.files['file']
+    model_path = request.form.get('model_path', 'model.tflite')
+    
+    # セキュアなパス処理
+    filename = secure_filename(file.filename)
+    timestamp = int(time.time())
+    input_filename = f"test_{timestamp}_{filename}"
+    input_path = os.path.join(app.config['TMP_TEST_FOLDER'], input_filename)
+    file.save(input_path)
+    
+    # 出力ファイル名
+    base, ext = os.path.splitext(input_filename)
+    output_filename = f"{base}_result{ext}"
+    output_path = os.path.join(app.config['TMP_TEST_FOLDER'], output_filename)
+    
+    # 検知器の初期化（指定されたモデルを使用）
+    try:
+        # モデルパスの検証（Uploads/ または 直下）
+        safe_model_path = model_path
+        if model_path.startswith('Uploads/'):
+            safe_model_path = os.path.join(os.getcwd(), 'Uploads', secure_filename(os.path.basename(model_path)))
+        
+        test_detector = HumanDetector(model_path=safe_model_path, threshold=0.4)
+        
+        is_video = ext.lower() in ['.mp4', '.avi', '.mov', '.mkv']
+        stats = {}
+        avg_inf_ms = 0
+        
+        if is_video:
+            # 動画処理 (Tools/model_test.py のロジックを流用)
+            cap = cv2.VideoCapture(input_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 20
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+            
+            inf_times = []
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                
+                t1 = time.time()
+                detections = test_detector.detect(frame)
+                inf_times.append(time.time() - t1)
+                
+                for d in detections:
+                    class_name = test_detector.classes.get(d[5], f"ID:{d[5]}")
+                    stats[class_name] = stats.get(class_name, 0) + 1
+                
+                res_frame = test_detector.draw_detections(frame, detections)
+                out.write(res_frame)
+            
+            cap.release()
+            out.release()
+            avg_inf_ms = round((sum(inf_times) / max(1, len(inf_times))) * 1000, 1)
+        else:
+            # 静止画処理
+            frame = cv2.imread(input_path)
+            if frame is not None:
+                t1 = time.time()
+                detections = test_detector.detect(frame)
+                avg_inf_ms = round((time.time() - t1) * 1000, 1)
+                
+                for d in detections:
+                    class_name = test_detector.classes.get(d[5], f"ID:{d[5]}")
+                    stats[class_name] = stats.get(class_name, 0) + 1
+                    
+                res_frame = test_detector.draw_detections(frame, detections)
+                cv2.imwrite(output_path, res_frame)
+        
+        # 結果のURL (一時ファイルの配信)
+        result_url = f"/test_files/{output_filename}"
+        
+        # 一時ファイルのクリーンアップ（スレッドで遅延実行）
+        def cleanup_task():
+            time.sleep(600) # 10分後に削除
+            try:
+                if os.path.exists(input_path): os.remove(input_path)
+                if os.path.exists(output_path): os.remove(output_path)
+            except: pass
+        threading.Thread(target=cleanup_task).start()
+        
+        return jsonify({
+            "ok": True,
+            "filename": filename,
+            "result_url": result_url,
+            "avg_inf_ms": avg_inf_ms,
+            "stats": stats
+        })
+        
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/test_files/<path:filename>')
+@requires_auth
+def serve_test_file(filename):
+    """一時テストファイルの配信"""
+    return send_from_directory(os.path.abspath(TMP_TEST_FOLDER), filename)
 
 @app.route('/records/<path:filename>')
 @requires_auth
