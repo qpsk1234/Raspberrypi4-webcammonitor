@@ -942,7 +942,8 @@ def api_config():
             'target_classes', 'show_all_detections',
             'recorder_post_seconds', 'recorder_start_delay_ms',
             'recorder_width', 'recorder_height', 'recorder_pre_frames',
-            'snapshot_width', 'snapshot_height', 'snapshot_mode'
+            'snapshot_width', 'snapshot_height', 'snapshot_mode',
+            'telegram_notify_mode'
         }
         filtered = {k: v for k, v in data.items() if k in allowed_keys}
         save_config(filtered)
