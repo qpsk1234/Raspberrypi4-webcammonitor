@@ -9,11 +9,15 @@ import shutil
 import time
 from werkzeug.utils import secure_filename
 from detector import HumanDetector
+from model_test_web import model_test_bp
 
 app = Flask(__name__)
 camera_instance = None
 logger_instance = None
 detector_instance = None  # HumanDetector をここで保持
+
+app.register_blueprint(model_test_bp)
+
 system_status = {
     "running": True,
     "detections_total": 0,
@@ -188,11 +192,12 @@ TEMPLATE = """
 <body>
 
   <!-- ヘッダー -->
-  <header>
+    <header>
     <div class="dot"></div>
     <h1>🎥 監視カメラ管理画面</h1>
     <div class="header-right">
       <span id="clock"></span>
+      <a href="/model_test" class="btn-nav" style="border-color:var(--accent); color:var(--accent);">🤖 モデルテスト</a>
       <a href="/media" class="btn-nav">📂 メディア閲覧</a>
       <button class="btn-settings" id="btn-settings" onclick="toggleSettings()">⚙ 設定</button>
     </div>
@@ -1071,6 +1076,11 @@ def api_media_list():
     # 日付の降順でソート
     files.sort(key=lambda x: x['mtime'], reverse=True)
     return jsonify(files)
+
+@app.route('/tmp_test/<path:filename>')
+@requires_auth
+def serve_tmp_test(filename):
+    return send_from_directory(app.config.get('TMP_TEST_FOLDER', 'tmp_test'), filename)
 
 def run_server(cam, logger=None, detector=None, notifier=None):
     global camera_instance, logger_instance, detector_instance, notifier_instance
