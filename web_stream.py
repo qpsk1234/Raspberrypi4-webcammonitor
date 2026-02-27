@@ -425,6 +425,18 @@ TEMPLATE = """
           <label>Chat ID</label>
           <input type="text" name="telegram_chat_id" value="{{ config.telegram_chat_id }}" placeholder="-123456789">
         </div>
+        <div class="form-group">
+          <label>通知モード</label>
+          <select name="telegram_notify_mode" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:8px;">
+            <option value="photo" {% if config.get('telegram_notify_mode', 'photo') == 'photo' %}selected{% endif %}>静止画のみ (デフォルト)</option>
+            <option value="video" {% if config.get('telegram_notify_mode') == 'video' %}selected{% endif %}>動画のみ</option>
+            <option value="both" {% if config.get('telegram_notify_mode') == 'both' %}selected{% endif %}>静止画と動画の両方</option>
+            <option value="none" {% if config.get('telegram_notify_mode') == 'none' %}selected{% endif %}>通知なし</option>
+          </select>
+          <div style="font-size:0.7rem; color:var(--muted); margin-top:6px;">
+            ※ 動画通知を選択した場合、録画終了後に送信されます。
+          </div>
+        </div>
         <div style="margin-top:20px; display:flex; gap:10px;">
           <button type="button" class="btn primary" onclick="saveForm('form-telegram','msg-telegram')">保存</button>
           <button type="button" class="btn" style="background:var(--accent2); color:white;" onclick="sendTestNotify()">通知テスト</button>

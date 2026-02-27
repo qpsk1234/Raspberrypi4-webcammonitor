@@ -37,7 +37,7 @@ def main():
         pre_frames=config.get('recorder_pre_frames', 60))
     logger   = DetectionLogger()
 
-    # Webサーバーを別スレッドで起動（logger, detector, notifierも渡す）
+    # Webサーバーを別スレッドで起動
     web_thread = threading.Thread(
         target=run_server, args=(cam, logger, detector, notifier), daemon=True)
     web_thread.start()
@@ -46,14 +46,60 @@ def main():
     print("System is running. Press 'q' to quit.")
     print("Web UI: http://0.0.0.0:5000")
 
-    last_notify_time = 0
     detection_session_start = None
-    last_target_time = 0 # 最後にターゲットを検知した時刻
-    session_notified = False  # セッション内で一度だけ通知するためのフラグ
+    last_target_time = 0
+    session_notified = False 
+    
+    # 遅延通知用バッファ
+    pending_notification = {
+        "frame": None,
+        "summary": "",
+        "max_score": 0.0,
+        "human_count": 0,
+        "video_path": None
+    }
+
+    def process_deferred_notification(notif_data, current_config):
+        """録画終了後に別スレッドで実行される通知処理"""
+        try:
+            mode = current_config.get('telegram_notify_mode', 'photo')
+            save_dir = current_config['save_directory']
+            
+            # 1. 静止画の保存
+            snap_w = current_config.get('snapshot_width', 1280)
+            snap_h = current_config.get('snapshot_height', 720)
+            snap_frame = cv2.resize(notif_data["frame"], (snap_w, snap_h))
+            
+            snap_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            snap_path = os.path.join(save_dir, f"snap_{snap_ts}.jpg")
+            cv2.imwrite(snap_path, snap_frame)
+            
+            # 2. Telegram送信
+            if mode != "none":
+                caption = f"⚠️ 検知通知\n対象: {notif_data['summary']}\n数: {notif_data['human_count']}\n時刻: {datetime.datetime.now().strftime('%H:%M:%S')}"
+                
+                if mode in ["photo", "both"]:
+                    notifier.send_photo(snap_frame, caption=caption)
+                
+                if mode in ["video", "both"]:
+                    # 録画ファイルが確定するまで少し待機（FFmpegの書き出し完了待ち）
+                    time.sleep(1.0) 
+                    if notif_data["video_path"] and os.path.exists(notif_data["video_path"]):
+                        notifier.send_video(notif_data["video_path"], caption=f"📹 録画ファイル: {notif_data['summary']}")
+            
+            # 3. ログ記録 (動画パスを含める)
+            logger.log(
+                human_count=notif_data["human_count"],
+                confidence_max=notif_data["max_score"],
+                snapshot_path=snap_path,
+                video_path=notif_data["video_path"])
+                
+            print(f"[Main] Deferred notification processed successfully (Mode: {mode})")
+        except Exception as e:
+            print(f"[Error] process_deferred_notification: {e}")
 
     try:
         while True:
-            # config をループごとに再読み込み
             current_config = load_config()
             detector.threshold = float(current_config.get('detection_threshold', 0.5))
             post_seconds = float(current_config.get('recorder_post_seconds', 5))
@@ -63,131 +109,91 @@ def main():
                 time.sleep(0.01)
                 continue
 
-            # オブジェクト検知
             all_detections = detector.detect(frame)
-            
             target_classes = current_config.get('target_classes', [1])
             target_detections = [d for d in all_detections if d[5] in target_classes]
 
-            # 描画処理
-            draw_list = all_detections if current_config.get('show_all_detections', True) else target_detections
-            if draw_list:
-                frame = detector.draw_detections(frame, draw_list)
+            if target_detections:
+                frame = detector.draw_detections(frame, all_detections if current_config.get('show_all_detections', True) else target_detections)
 
-            # プリ録画バッファの更新（常時）
             recorder.update_buffer(frame)
-
-            # 録画の書き込み（録画中であれば毎フレーム実行）
             recorder.write(frame)
 
             if target_detections:
                 last_target_time = time.time()
-                # 最大スコア算出
                 max_score = max((d[4] for d in target_detections), default=0.0)
 
-                # ステータス更新
                 system_status['human_count'] = len(target_detections) 
                 if len(target_detections) > system_status.get('human_count_max', 0):
                     system_status['human_count_max'] = len(target_detections)
                 
                 system_status['detections_total'] += 1
-                system_status['last_detected'] = \
-                    datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                system_status['last_detected'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # 録画開始遅延の判定
                 if detection_session_start is None:
                     detection_session_start = time.time()
                 
                 elapsed_ms = (time.time() - detection_session_start) * 1000
                 delay_ms = current_config.get('recorder_start_delay_ms', 0)
                 
-                # 録画開始
                 if elapsed_ms >= delay_ms:
                     recorder.start_recording(frame)
 
-                # 通知とログ記録（セッション内で一度だけ実行）
+                # 通知データの保持（セッション内で一度だけ、最良の瞬間のフレームを確保）
                 if not session_notified and elapsed_ms >= delay_ms:
                     label_names = [detector.classes.get(d[5], f"ID:{d[5]}") for d in target_detections]
                     target_summary = ", ".join(list(set(label_names)))
-                    print(f"Target detected ({target_summary})! Sending session notification...")
                     
-                    # スナップショット保存
-                    snap_w = current_config.get('snapshot_width', 1280)
-                    snap_h = current_config.get('snapshot_height', 720)
-                    snap_frame = cv2.resize(frame, (snap_w, snap_h))
-                    
-                    snap_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                    snap_path = os.path.join(current_config['save_directory'], f"snap_{snap_ts}_start.jpg")
-                    cv2.imwrite(snap_path, snap_frame)
-                    
-                    # 通知
-                    notifier.send_photo(snap_frame, caption=f"⚠️ 検知（開始）: {target_summary}\n数: {len(target_detections)}")
-                    
-                    # ログ記録
-                    logger.log(
-                        human_count=len(target_detections),
-                        confidence_max=max_score,
-                        snapshot_path=snap_path,
-                        video_path=recorder.current_video_path)
+                    # メモリにバッファリング
+                    pending_notification["frame"] = frame.copy() # コピーして保持
+                    pending_notification["summary"] = target_summary
+                    pending_notification["max_score"] = max_score
+                    pending_notification["human_count"] = len(target_detections)
+                    pending_notification["video_path"] = recorder.current_video_path # パスを保持
                     
                     session_notified = True
-                    last_notify_time = time.time()
+                    print(f"[Main] Detection Buffered. Will notify after recording ends.")
             else:
                 system_status['human_count'] = 0
-                
-                # 検知が途切れたときの判定
                 if recorder.is_recording:
-                    # 既に録画中の場合、停止をスケジュール
                     recorder.schedule_stop(post_seconds)
                 
-                # セッションのリセット判定：最後に検知してから post_seconds 以上経過した場合のみ
-                # これにより、一瞬の検知漏れで通知が複数回飛ぶのを防ぐ
-                if time.time() - last_target_time > post_seconds:
-                    if session_notified and current_config.get('snapshot_mode') == 'both':
-                        # 検知終了時（ポスト録画終了直前）のスナップショットと通知
-                        snap_w = current_config.get('snapshot_width', 1280)
-                        snap_h = current_config.get('snapshot_height', 720)
-                        snap_frame = cv2.resize(frame, (snap_w, snap_h))
-                        snap_path = os.path.join(
-                            current_config['save_directory'],
-                            f"snap_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_end.jpg")
-                        cv2.imwrite(snap_path, snap_frame)
-                        notifier.send_photo(snap_frame, caption=f"ℹ️ 検知終了\n最終確認時刻: {datetime.datetime.now().strftime('%H:%M:%S')}")
-
+                # セッション終了（ポスト録画分が経過）
+                if session_notified and (time.time() - last_target_time > post_seconds):
+                    # 録画が終了し、かつ通知待ちデータがある場合
+                    # バックグラウンドスレッドで通知処理を実行
+                    notif_thread = threading.Thread(
+                        target=process_deferred_notification, 
+                        args=(pending_notification.copy(), current_config),
+                        daemon=True
+                    )
+                    notif_thread.start()
+                    
+                    # フラグとバッファをリセット
                     detection_session_start = None
                     session_notified = False
+                    pending_notification["frame"] = None
 
-            # 最終的なフレームを Web UI ストリーム用に共有
             web_stream.latest_processed_frame = frame
 
-            # モニター表示 (GUI)
             if current_config.get('use_gui', False):
                 try:
                     cv2.imshow("Surveillance Camera", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'): break
                 except cv2.error:
-                    print("Warning: GUI not available. Disabling.")
-                    config['use_gui'] = False
-
-            if config.get('use_gui', False):
-                try:
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                except cv2.error:
-                    config['use_gui'] = False
+                    current_config['use_gui'] = False
             else:
                 time.sleep(0.01)
 
     except KeyboardInterrupt:
         pass
     finally:
-        print("Stopping System...")
         recorder.release()
         cam.stop()
-        if config.get('use_gui', False):
-            try:
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
